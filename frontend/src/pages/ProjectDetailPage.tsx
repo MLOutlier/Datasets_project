@@ -16,7 +16,7 @@ export default function ProjectDetailPage() {
   const [instructionFile, setInstructionFile] = useState<File | null>(null);
   const [instructionUploadError, setInstructionUploadError] = useState<string | null>(null);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
-  const [exportFormat, setExportFormat] = useState<"coco" | "yolo" | "both">("both");
+  const [exportFormat, setExportFormat] = useState<"coco" | "yolo" | "voc" | "csv" | "both">("both");
   const [archiveError, setArchiveError] = useState<string | null>(null);
 
   const projectQuery = useQuery({
@@ -64,10 +64,11 @@ export default function ProjectDetailPage() {
 
   const finalizeMutation = useMutation({
     mutationFn: async () => {
-      if (!projectId || !activeImportId) {
+      const importId = activeImportId || String(overviewQuery.data?.imports?.latest_ready_import_id || "");
+      if (!projectId || !importId) {
         throw new Error("Nothing to finalize");
       }
-      return workflowAPI.finalize(projectId, activeImportId);
+      return workflowAPI.finalize(projectId, importId);
     },
     onSuccess: () => {
       setFinalizeError(null);
@@ -120,6 +121,8 @@ export default function ProjectDetailPage() {
 
   const overview = overviewQuery.data;
   const lastUploadPreview = uploadMutation.data?.preview;
+  const readyImportId = activeImportId || String(overview?.imports?.latest_ready_import_id || "");
+  const hasVideoAssets = Array.isArray(overview?.imports?.video_asset_ids) && overview.imports.video_asset_ids.length > 0;
 
   const completion = useMemo(() => {
     const total = Number(overview?.work_items?.total || 0);
@@ -148,6 +151,12 @@ export default function ProjectDetailPage() {
         <div className="flex items-center gap-3">
           <Link to={`/projects/${projectId}/workflow`} className="btn-secondary">
             Настройка разметки
+          </Link>
+          <Link to={`/projects/${projectId}/intervals`} className="btn-secondary">
+            Этап 1-2: Интервалы
+          </Link>
+          <Link to="/quality" className="btn-secondary">
+            Этап 4: Валидация bbox
           </Link>
           <button className="btn-secondary" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
             {exportMutation.isPending ? "Exporting..." : "Export dataset"}
@@ -204,21 +213,25 @@ export default function ProjectDetailPage() {
             <button className="btn-primary" type="button" onClick={() => uploadMutation.mutate()} disabled={uploadMutation.isPending || uploadQueue.length === 0}>
               {uploadMutation.isPending ? "Uploading..." : "Upload to preview"}
             </button>
-            <button className="btn-secondary" type="button" onClick={() => finalizeMutation.mutate()} disabled={!activeImportId || finalizeMutation.isPending}>
+            <button className="btn-secondary" type="button" onClick={() => finalizeMutation.mutate()} disabled={!readyImportId || finalizeMutation.isPending}>
               {finalizeMutation.isPending ? "Finalizing..." : "Finalize import"}
             </button>
             <select
               className="input-field w-auto"
               value={exportFormat}
-              onChange={(event) => setExportFormat(event.target.value as "coco" | "yolo" | "both")}
+              onChange={(event) => setExportFormat(event.target.value as "coco" | "yolo" | "voc" | "csv" | "both")}
             >
-              <option value="both">Export: COCO + YOLO</option>
+              <option value="both">Export: COCO + YOLO + VOC + CSV</option>
               <option value="coco">Export: COCO</option>
               <option value="yolo">Export: YOLO</option>
+              <option value="voc">Export: VOC</option>
+              <option value="csv">Export: CSV</option>
             </select>
           </div>
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
-            Assignments for annotators are created only after you click <span className="font-semibold">Finalize import</span>. Until then, the project will not appear in their annotation workspace.
+            {hasVideoAssets
+              ? "Для видео первый этап стартует сразу после успешной загрузки: выбранные исполнители получают задачи на интервалы. Finalize import нужен позже для image-only импортов или ручной догенерации bbox-задач по уже утвержденным интервалам."
+              : "Для изображений нажмите Finalize import после preview, чтобы создать bbox-задачи для выбранных исполнителей."}
           </div>
           {uploadError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{uploadError}</div> : null}
           {finalizeError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{finalizeError}</div> : null}
@@ -230,6 +243,11 @@ export default function ProjectDetailPage() {
               {lastUploadPreview.cleanup ? (
                 <div className="mt-2">
                   Cleanup: duplicates removed {lastUploadPreview.cleanup.duplicates_removed ?? 0}, invalid frames removed {lastUploadPreview.cleanup.invalid_frames_removed ?? 0}
+                </div>
+              ) : null}
+              {lastUploadPreview.ffmpeg ? (
+                <div className={`mt-2 ${lastUploadPreview.ffmpeg.available ? "text-emerald-700 dark:text-emerald-300" : "text-red-700 dark:text-red-300"}`}>
+                  ffmpeg: {String(lastUploadPreview.ffmpeg.message || "")}
                 </div>
               ) : null}
               {lastUploadPreview.errors.length > 0 ? <div className="mt-2">Errors: {lastUploadPreview.errors.join("; ")}</div> : null}

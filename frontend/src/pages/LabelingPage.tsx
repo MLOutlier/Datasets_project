@@ -1,7 +1,6 @@
 import { Link } from "react-router-dom";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { tasksAPI } from "../services/api";
 import { annotatorAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
@@ -38,7 +37,7 @@ export function LabelingPage() {
       <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Проекты для разметки</h1>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-          Откройте проект, изучите инструкции и затем последовательно проходите свои кадры.
+          Откройте конкретный проект, изучите инструкцию и выберите доступный этап внутри него.
         </p>
       </div>
 

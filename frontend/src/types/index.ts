@@ -193,6 +193,20 @@ export interface ProjectParticipantRules {
   min_sequence_size?: number;
 }
 
+export interface VideoInterval {
+  id: string;
+  asset_id: string;
+  status: "draft" | "approved" | "rejected" | string;
+  source: "auto" | "manual" | string;
+  confidence: number;
+  start_frame: number;
+  end_frame: number;
+  start_sec: number;
+  end_sec: number;
+  metadata?: Record<string, unknown>;
+  validated_at?: string | null;
+}
+
 export interface Project {
   id: string;
   owner_id: string;
@@ -254,6 +268,10 @@ export interface ProjectImportResponse {
       invalid_frames_removed?: number;
       duplicate_assets?: string[];
     };
+    ffmpeg?: {
+      available: boolean;
+      message: string;
+    };
   };
 }
 
@@ -272,10 +290,10 @@ export interface ProjectOverview {
     project_type: string;
     annotation_type: string;
   };
-  imports: Record<string, number>;
-  work_items: Record<string, number>;
-  assignments: Record<string, number>;
-  reviews: Record<string, number>;
+  imports: Record<string, unknown>;
+  work_items: Record<string, unknown>;
+  assignments: Record<string, unknown>;
+  reviews: Record<string, unknown>;
   annotators: Array<{
     user_id: string;
     username: string;
@@ -521,6 +539,10 @@ export interface ProjectExportPayload {
       lines: string[];
     }>;
   };
+  voc?: {
+    records: Array<Record<string, unknown>>;
+  };
+  csv?: Array<Record<string, unknown>>;
 }
 
 export interface ValidationQueueItem {

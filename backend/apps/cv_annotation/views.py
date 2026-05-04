@@ -10,20 +10,55 @@ from rest_framework.views import APIView
 from apps.projects.models import Project, ProjectMembership
 from apps.users.models import User
 from apps.users.views import authenticate_from_jwt
-from .models import Assignment, ImportAsset, ImportSession, ReviewRecord, SecurityEvent, WorkAnnotation, WorkItem
-from .serializers import AssignmentSubmitSerializer, ImportFinalizeSerializer, ReviewResolveSerializer, ValidationBatchResolveSerializer
+from .models import (
+    Assignment,
+    BBoxValidationAssignment,
+    ImportAsset,
+    ImportSession,
+    IntervalValidationAssignment,
+    ReviewRecord,
+    SecurityEvent,
+    VideoChunkAssignment,
+    VideoChunkTask,
+    VideoInterval,
+    WorkAnnotation,
+    WorkItem,
+)
+from .serializers import (
+    AssignmentSubmitSerializer,
+    BBoxValidationSubmitSerializer,
+    ImportFinalizeSerializer,
+    IntervalValidationDecisionSerializer,
+    ReviewResolveSerializer,
+    ValidationBatchResolveSerializer,
+    VideoChunkSubmitSerializer,
+    VideoIntervalUpsertSerializer,
+    VideoIntervalValidationSerializer,
+)
 from .services.upload import save_project_file
 from .services.workflow import (
     annotator_batch_payload,
     build_dataset_export_archive,
     build_dataset_export,
     build_import_preview,
+    bbox_validation_queue_for_annotator,
     create_work_items_for_import,
+    ensure_bbox_validation_assignments,
+    ensure_interval_validation_assignments,
+    generate_auto_intervals_for_asset,
+    list_video_intervals,
+    annotator_interval_chunk_queue,
     process_import_asset,
     project_overview,
     resolve_review,
+    submit_bbox_validation_assignment,
+    submit_interval_chunk_assignment,
+    submit_interval_validation,
+    validator_interval_queue,
     resolve_validation_batch,
     save_assignment_annotation,
+    upsert_video_intervals,
+    validate_video_intervals,
     validation_batch_detail,
     validation_queue,
 )
@@ -55,6 +90,12 @@ class AuthenticatedAPIView(APIView):
         if user.role == User.ROLE_ANNOTATOR:
             assignment = Assignment.objects(project=project, annotator=user).first()
             if assignment:
+                return project
+            if VideoChunkAssignment.objects(project=project, annotator=user).first():
+                return project
+            if IntervalValidationAssignment.objects(project=project, validator=user).first():
+                return project
+            if BBoxValidationAssignment.objects(project=project, validator=user).first():
                 return project
         return None
 
@@ -157,6 +198,226 @@ class ProjectOverviewView(AuthenticatedAPIView):
         return Response(project_overview(project), status=status.HTTP_200_OK)
 
 
+class ProjectVideoIntervalsView(AuthenticatedAPIView):
+    def get(self, request, project_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        project = self.get_project_for_user(user, project_id)
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        asset_id = str(request.query_params.get("asset_id") or "").strip()
+        status_filter = str(request.query_params.get("status") or "").strip() or None
+        asset = None
+        if asset_id:
+            if not ObjectId.is_valid(asset_id):
+                return Response({"detail": "Invalid asset id"}, status=status.HTTP_400_BAD_REQUEST)
+            asset = ImportAsset.objects(id=ObjectId(asset_id), project=project).first()
+            if not asset:
+                return Response({"detail": "Asset not found"}, status=status.HTTP_404_NOT_FOUND)
+        intervals = list_video_intervals(project, asset=asset, status=status_filter)
+        payload = [
+            {
+                "id": str(interval.id),
+                "asset_id": str(interval.asset.id),
+                "status": interval.status,
+                "source": interval.source,
+                "confidence": float(interval.confidence or 0.0),
+                "start_frame": int(interval.start_frame),
+                "end_frame": int(interval.end_frame),
+                "start_sec": float(interval.start_sec or 0.0),
+                "end_sec": float(interval.end_sec or 0.0),
+                "metadata": interval.metadata or {},
+                "validated_at": interval.validated_at,
+            }
+            for interval in intervals
+        ]
+        return Response({"items": payload}, status=status.HTTP_200_OK)
+
+    def post(self, request, project_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        project = self.get_project_for_user(user, project_id, require_owner=True)
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        asset_id = str(request.data.get("asset_id") or "").strip()
+        if not ObjectId.is_valid(asset_id):
+            return Response({"detail": "Invalid asset id"}, status=status.HTTP_400_BAD_REQUEST)
+        asset = ImportAsset.objects(id=ObjectId(asset_id), project=project).first()
+        if not asset or asset.asset_type != ImportAsset.TYPE_VIDEO:
+            return Response({"detail": "Video asset not found"}, status=status.HTTP_404_NOT_FOUND)
+        intervals_payload = request.data.get("intervals") or []
+        if not isinstance(intervals_payload, list):
+            return Response({"detail": "intervals must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+        validated_items = []
+        for item in intervals_payload:
+            serializer = VideoIntervalUpsertSerializer(data=item)
+            serializer.is_valid(raise_exception=True)
+            validated_items.append(serializer.validated_data)
+        result = upsert_video_intervals(project, asset, user, validated_items)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class ProjectVideoIntervalsAutoDraftView(AuthenticatedAPIView):
+    def post(self, request, project_id: str, asset_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        project = self.get_project_for_user(user, project_id, require_owner=True)
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not ObjectId.is_valid(asset_id):
+            return Response({"detail": "Invalid asset id"}, status=status.HTTP_400_BAD_REQUEST)
+        asset = ImportAsset.objects(id=ObjectId(asset_id), project=project).first()
+        if not asset or asset.asset_type != ImportAsset.TYPE_VIDEO:
+            return Response({"detail": "Video asset not found"}, status=status.HTTP_404_NOT_FOUND)
+        result = generate_auto_intervals_for_asset(asset, created_by=user)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class ProjectVideoIntervalsValidateView(AuthenticatedAPIView):
+    def post(self, request, project_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        project = self.get_project_for_user(user, project_id)
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role not in (User.ROLE_REVIEWER, User.ROLE_ADMIN, User.ROLE_CUSTOMER):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = VideoIntervalValidationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = validate_video_intervals(
+            project,
+            actor=user,
+            interval_ids=serializer.validated_data["interval_ids"],
+            decision=serializer.validated_data["decision"],
+            comment=serializer.validated_data.get("comment", ""),
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class AnnotatorIntervalChunkQueueView(AuthenticatedAPIView):
+    def get(self, request):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        if user.role not in (User.ROLE_ANNOTATOR, User.ROLE_ADMIN):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        items = annotator_interval_chunk_queue(user) if user.role == User.ROLE_ANNOTATOR else annotator_interval_chunk_queue(user)
+        return Response({"items": items}, status=status.HTTP_200_OK)
+
+
+class AnnotatorIntervalChunkSubmitView(AuthenticatedAPIView):
+    def post(self, request, assignment_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        if not ObjectId.is_valid(assignment_id):
+            return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
+        assignment = VideoChunkAssignment.objects(id=ObjectId(assignment_id)).first()
+        if not assignment:
+            return Response({"detail": "Assignment not found"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role != User.ROLE_ADMIN and str(assignment.annotator.id) != str(user.id):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = VideoChunkSubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = submit_interval_chunk_assignment(
+            assignment,
+            intervals=serializer.validated_data["intervals"],
+            comment=serializer.validated_data.get("comment", ""),
+        )
+        ensure_interval_validation_assignments(assignment.project, min_validators=3)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class IntervalValidationQueueView(AuthenticatedAPIView):
+    def get(self, request):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        if user.role not in (User.ROLE_ANNOTATOR, User.ROLE_ADMIN):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        items = validator_interval_queue(user)
+        return Response({"items": items}, status=status.HTTP_200_OK)
+
+
+class IntervalValidationSubmitView(AuthenticatedAPIView):
+    def post(self, request, assignment_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        if not ObjectId.is_valid(assignment_id):
+            return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
+        assignment = IntervalValidationAssignment.objects(id=ObjectId(assignment_id)).first()
+        if not assignment:
+            return Response({"detail": "Assignment not found"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role != User.ROLE_ADMIN and str(assignment.validator.id) != str(user.id):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = IntervalValidationDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = submit_interval_validation(
+            assignment,
+            decision=serializer.validated_data["decision"],
+            comment=serializer.validated_data.get("comment", ""),
+            min_validators=3,
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class BBoxValidationQueueView(AuthenticatedAPIView):
+    def get(self, request):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        if user.role not in (User.ROLE_ANNOTATOR, User.ROLE_ADMIN):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        if user.role == User.ROLE_ADMIN:
+            projects = list(Project.objects)
+        else:
+            member_projects = [membership.project for membership in ProjectMembership.objects(user=user, is_active=True)]
+            owner_projects = list(Project.objects(owner=user))
+            projects = list({str(item.id): item for item in [*member_projects, *owner_projects]}.values())
+        for project in projects:
+            ensure_bbox_validation_assignments(project=project, min_validators=3, real_items_per_batch=20, golden_items_per_batch=10)
+        items = bbox_validation_queue_for_annotator(user)
+        return Response({"items": items}, status=status.HTTP_200_OK)
+
+
+class BBoxValidationSubmitView(AuthenticatedAPIView):
+    def post(self, request, assignment_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        if not ObjectId.is_valid(assignment_id):
+            return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
+        assignment = BBoxValidationAssignment.objects(id=ObjectId(assignment_id)).first()
+        if not assignment:
+            return Response({"detail": "Assignment not found"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role != User.ROLE_ADMIN and str(assignment.validator.id) != str(user.id):
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        serializer = BBoxValidationSubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = submit_bbox_validation_assignment(
+            assignment,
+            decisions=serializer.validated_data.get("decisions", {}),
+            golden_decisions=serializer.validated_data.get("golden_decisions", {}),
+            min_score=0.8,
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class ProjectExportView(AuthenticatedAPIView):
     def get(self, request, project_id: str):
         try:
@@ -167,8 +428,8 @@ class ProjectExportView(AuthenticatedAPIView):
         if not project:
             return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
         export_format = (request.query_params.get("format") or "both").strip().lower()
-        if export_format not in {"coco", "yolo", "both"}:
-            return Response({"detail": "Invalid export format. Use coco, yolo or both"}, status=status.HTTP_400_BAD_REQUEST)
+        if export_format not in {"coco", "yolo", "voc", "csv", "both"}:
+            return Response({"detail": "Invalid export format. Use coco, yolo, voc, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
         as_archive = (request.query_params.get("download") or "").strip().lower() in {"1", "true", "yes"}
         if as_archive:
             archive_name, archive_bytes = build_dataset_export_archive(project, export_format=export_format)
@@ -222,12 +483,13 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             else Assignment.objects.order_by("queue_position", "-updated_at", "-created_at")
         )
         grouped: dict[str, dict] = {}
-        for assignment in assignments:
-            project = assignment.project
+
+        def ensure_bucket(project: Project, last_activity_at=None) -> dict:
             project_id = str(project.id)
             bucket = grouped.get(project_id)
             if not bucket:
                 bucket = {
+                    "_project": project,
                     "project_id": project_id,
                     "project_title": project.title,
                     "project_status": project.status,
@@ -245,11 +507,22 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
                     "batch_count": 0,
                     "validation_ready_count": 0,
                     "total_assignments": 0,
+                    "interval_chunk_count": 0,
+                    "interval_validation_count": 0,
+                    "bbox_validation_count": 0,
                     "next_assignment_id": None,
                     "active_assignment_id": None,
-                    "last_activity_at": assignment.updated_at or assignment.created_at,
+                    "last_activity_at": last_activity_at or project.updated_at or project.created_at,
                 }
                 grouped[project_id] = bucket
+            if last_activity_at and last_activity_at > bucket["last_activity_at"]:
+                bucket["last_activity_at"] = last_activity_at
+            return bucket
+
+        for assignment in assignments:
+            project = assignment.project
+            project_id = str(project.id)
+            bucket = ensure_bucket(project, assignment.updated_at or assignment.created_at)
             workflow_meta = assignment.work_item.workflow_meta or {}
             if workflow_meta.get("validation_ready"):
                 bucket["validation_ready_count"] += 1
@@ -287,11 +560,57 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             if assignment_updated and assignment_updated > bucket["last_activity_at"]:
                 bucket["last_activity_at"] = assignment_updated
 
+        interval_chunk_assignments = list(
+            VideoChunkAssignment.objects(annotator=user, status__in=[VideoChunkAssignment.STATUS_ASSIGNED, VideoChunkAssignment.STATUS_IN_PROGRESS]).order_by("created_at")
+            if user.role == User.ROLE_ANNOTATOR
+            else VideoChunkAssignment.objects(status__in=[VideoChunkAssignment.STATUS_ASSIGNED, VideoChunkAssignment.STATUS_IN_PROGRESS]).order_by("created_at")
+        )
+        for assignment in interval_chunk_assignments:
+            bucket = ensure_bucket(assignment.project, assignment.updated_at or assignment.created_at)
+            bucket["interval_chunk_count"] += 1
+            bucket["available_count"] += 1
+            bucket["total_assignments"] += 1
+
+        interval_validation_assignments = list(
+            IntervalValidationAssignment.objects(validator=user, status=IntervalValidationAssignment.STATUS_ASSIGNED).order_by("created_at")
+            if user.role == User.ROLE_ANNOTATOR
+            else IntervalValidationAssignment.objects(status=IntervalValidationAssignment.STATUS_ASSIGNED).order_by("created_at")
+        )
+        for assignment in interval_validation_assignments:
+            if not assignment.interval.created_by:
+                continue
+            if user.role == User.ROLE_ANNOTATOR and str(assignment.interval.created_by.id) == str(user.id):
+                continue
+            bucket = ensure_bucket(assignment.project, assignment.updated_at or assignment.created_at)
+            bucket["interval_validation_count"] += 1
+            bucket["available_count"] += 1
+            bucket["total_assignments"] += 1
+
+        bbox_validation_assignments = list(
+            BBoxValidationAssignment.objects(validator=user, status=BBoxValidationAssignment.STATUS_ASSIGNED).order_by("created_at")
+            if user.role == User.ROLE_ANNOTATOR
+            else BBoxValidationAssignment.objects(status=BBoxValidationAssignment.STATUS_ASSIGNED).order_by("created_at")
+        )
+        for assignment in bbox_validation_assignments:
+            bucket = ensure_bucket(assignment.project, assignment.updated_at or assignment.created_at)
+            bucket["bbox_validation_count"] += 1
+            bucket["available_count"] += 1
+            bucket["total_assignments"] += 1
+
         available_projects = []
         active_projects = []
         completed_projects = []
         for project in grouped.values():
-            if project["active_assignment_id"]:
+            project_obj = project.pop("_project", None)
+            pipeline_pending = False
+            if project_obj:
+                pipeline_pending = (
+                    any(interval.created_by for interval in VideoInterval.objects(project=project_obj, status=VideoInterval.STATUS_DRAFT))
+                    or WorkItem.objects(project=project_obj, validation_status=WorkItem.VALIDATION_PENDING).count() > 0
+                    or IntervalValidationAssignment.objects(project=project_obj, status=IntervalValidationAssignment.STATUS_ASSIGNED).count() > 0
+                    or BBoxValidationAssignment.objects(project=project_obj, status=BBoxValidationAssignment.STATUS_ASSIGNED).count() > 0
+                )
+            if project["active_assignment_id"] or (pipeline_pending and project["available_count"] == 0):
                 active_projects.append(project)
             elif project["available_count"] > 0:
                 available_projects.append(project)
@@ -328,6 +647,25 @@ class AnnotatorProjectDetailView(AuthenticatedAPIView):
         assignments = list(assignments_qs)
         next_assignment = next((item for item in assignments if item.status == Assignment.STATUS_ASSIGNED), None)
         active_assignment = next((item for item in assignments if item.status in [Assignment.STATUS_IN_PROGRESS, Assignment.STATUS_DRAFT]), None)
+        interval_chunk_count = (
+            VideoChunkAssignment.objects(project=project, annotator=user, status__in=[VideoChunkAssignment.STATUS_ASSIGNED, VideoChunkAssignment.STATUS_IN_PROGRESS]).count()
+            if user.role == User.ROLE_ANNOTATOR
+            else VideoChunkAssignment.objects(project=project, status__in=[VideoChunkAssignment.STATUS_ASSIGNED, VideoChunkAssignment.STATUS_IN_PROGRESS]).count()
+        )
+        interval_validation_count = (
+            sum(
+                1
+                for item in IntervalValidationAssignment.objects(project=project, validator=user, status=IntervalValidationAssignment.STATUS_ASSIGNED)
+                if item.interval.created_by and str(item.interval.created_by.id) != str(user.id)
+            )
+            if user.role == User.ROLE_ANNOTATOR
+            else sum(1 for item in IntervalValidationAssignment.objects(project=project, status=IntervalValidationAssignment.STATUS_ASSIGNED) if item.interval.created_by)
+        )
+        bbox_validation_count = (
+            BBoxValidationAssignment.objects(project=project, validator=user, status=BBoxValidationAssignment.STATUS_ASSIGNED).count()
+            if user.role == User.ROLE_ANNOTATOR
+            else BBoxValidationAssignment.objects(project=project, status=BBoxValidationAssignment.STATUS_ASSIGNED).count()
+        )
 
         payload = {
             "project_id": str(project.id),
@@ -355,6 +693,9 @@ class AnnotatorProjectDetailView(AuthenticatedAPIView):
                 "validation_pending_count": sum(1 for item in WorkItem.objects(project=project) if item.validation_status == WorkItem.VALIDATION_PENDING),
                 "validation_approved_count": sum(1 for item in WorkItem.objects(project=project) if item.validation_status == WorkItem.VALIDATION_APPROVED),
                 "validation_needs_changes_count": sum(1 for item in WorkItem.objects(project=project) if item.validation_status == WorkItem.VALIDATION_NEEDS_CHANGES),
+                "interval_chunk_count": interval_chunk_count,
+                "interval_validation_count": interval_validation_count,
+                "bbox_validation_count": bbox_validation_count,
             },
             "workflow": project_overview(project).get("work_items", {}),
             "next_assignment_id": str(next_assignment.id) if next_assignment else None,
@@ -412,7 +753,7 @@ class AnnotatorAssignmentDetailView(AuthenticatedAPIView):
         draft_comment = annotation.comment if annotation and annotation.status == WorkAnnotation.STATUS_DRAFT else ""
         pre_annotations = assignment.work_item.pre_annotations or {}
         preannotation_payload = {}
-        if pre_annotations and not pre_annotations.get("is_placeholder") and assignment.work_item.pre_annotation_model not in {"", "baseline-box-v1"}:
+        if pre_annotations and pre_annotations.get("boxes"):
             preannotation_payload = pre_annotations
         return Response(
             {

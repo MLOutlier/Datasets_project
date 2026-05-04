@@ -13,6 +13,24 @@ class FrameExtractionError(RuntimeError):
     pass
 
 
+def ffmpeg_diagnostics() -> dict:
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return {"available": False, "message": "ffmpeg is not installed or not available in PATH"}
+    except subprocess.TimeoutExpired:
+        return {"available": False, "message": "ffmpeg diagnostics timed out"}
+    if result.returncode != 0:
+        return {"available": False, "message": result.stderr.strip() or "ffmpeg command failed"}
+    first_line = (result.stdout or "").splitlines()
+    return {"available": True, "message": first_line[0] if first_line else "ffmpeg available"}
+
+
 def extract_video_frames(file_uri: str, project_id: str, import_id: str, interval_sec: float) -> List[dict]:
     video_path = absolute_media_path(file_uri)
     if not video_path.exists():

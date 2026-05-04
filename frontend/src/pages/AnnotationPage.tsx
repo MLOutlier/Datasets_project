@@ -37,8 +37,7 @@ export default function AnnotationPage() {
   useEffect(() => {
     if (!assignmentQuery.data) return;
     const draftBoxes = assignmentQuery.data.draft?.boxes ?? [];
-    const preAnnotatedBoxes = assignmentQuery.data.pre_annotations?.boxes ?? [];
-    const initialBoxes = draftBoxes.length > 0 ? draftBoxes : preAnnotatedBoxes;
+    const initialBoxes = draftBoxes;
     setBoxes(initialBoxes);
     setComment(assignmentQuery.data.comment ?? "");
     setSelectedLabel((assignmentQuery.data.label_schema?.[0]?.name as string | undefined) ?? "");

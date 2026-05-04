@@ -18,14 +18,14 @@ export default function ProjectsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Projects</h1>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Проекты</h1>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
             {user?.role === "annotator" ? "Assigned CV projects ready for annotation" : user?.role === "reviewer" ? "Projects waiting for review decisions" : "Create and monitor dataset production workflows"}
           </p>
         </div>
         {canCreate ? (
           <Link to="/projects/create" className="btn-primary">
-            New CV Project
+            Новый проект
           </Link>
         ) : null}
       </div>
@@ -43,7 +43,7 @@ export default function ProjectsPage() {
           </p>
           {canCreate ? (
             <Link to="/projects/create" className="btn-primary inline-block mt-5">
-              Create Project
+              Создать проект
             </Link>
           ) : null}
         </div>

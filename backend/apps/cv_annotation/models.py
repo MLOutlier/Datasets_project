@@ -92,6 +92,163 @@ class FrameItem(Document):
     }
 
 
+class VideoInterval(Document):
+    STATUS_DRAFT = "draft"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+
+    SOURCE_AUTO = "auto"
+    SOURCE_MANUAL = "manual"
+
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    asset = ReferenceField(ImportAsset, required=True, reverse_delete_rule=CASCADE)
+    start_frame = IntField(required=True, min_value=0)
+    end_frame = IntField(required=True, min_value=0)
+    start_sec = FloatField(default=0.0)
+    end_sec = FloatField(default=0.0)
+    status = StringField(required=True, default=STATUS_DRAFT, choices=[STATUS_DRAFT, STATUS_APPROVED, STATUS_REJECTED])
+    source = StringField(required=True, default=SOURCE_AUTO, choices=[SOURCE_AUTO, SOURCE_MANUAL])
+    confidence = FloatField(default=0.0)
+    metadata = DictField(default=dict)
+    created_by = ReferenceField(User, null=True, reverse_delete_rule=CASCADE)
+    validated_by = ReferenceField(User, null=True, reverse_delete_rule=CASCADE)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+    validated_at = DateTimeField(null=True)
+
+    meta = {
+        "collection": "cv_video_intervals",
+        "indexes": [
+            "project",
+            "asset",
+            "status",
+            ("asset", "start_frame"),
+        ],
+    }
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class VideoChunkTask(Document):
+    STATUS_PENDING = "pending"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_COMPLETED = "completed"
+
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    asset = ReferenceField(ImportAsset, required=True, reverse_delete_rule=CASCADE)
+    chunk_index = IntField(required=True, min_value=0)
+    start_frame = IntField(required=True, min_value=0)
+    end_frame = IntField(required=True, min_value=0)
+    status = StringField(required=True, default=STATUS_PENDING, choices=[STATUS_PENDING, STATUS_IN_PROGRESS, STATUS_COMPLETED])
+    required_annotations = IntField(default=1, min_value=1)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "cv_video_chunk_tasks",
+        "indexes": ["project", "asset", "status", ("asset", "chunk_index")],
+    }
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class VideoChunkAssignment(Document):
+    STATUS_ASSIGNED = "assigned"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_SUBMITTED = "submitted"
+    STATUS_ACCEPTED = "accepted"
+    STATUS_REJECTED = "rejected"
+
+    task = ReferenceField(VideoChunkTask, required=True, reverse_delete_rule=CASCADE)
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    annotator = ReferenceField(User, required=True, reverse_delete_rule=CASCADE)
+    status = StringField(required=True, default=STATUS_ASSIGNED, choices=[STATUS_ASSIGNED, STATUS_IN_PROGRESS, STATUS_SUBMITTED, STATUS_ACCEPTED, STATUS_REJECTED])
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "cv_video_chunk_assignments",
+        "indexes": [{"fields": ["task", "annotator"], "unique": True}, "project", "annotator", "status"],
+    }
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class VideoChunkAnnotation(Document):
+    STATUS_DRAFT = "draft"
+    STATUS_SUBMITTED = "submitted"
+
+    assignment = ReferenceField(VideoChunkAssignment, required=True, reverse_delete_rule=CASCADE, unique=True)
+    intervals = ListField(DictField(), default=list)
+    comment = StringField(default="")
+    status = StringField(required=True, default=STATUS_DRAFT, choices=[STATUS_DRAFT, STATUS_SUBMITTED])
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "cv_video_chunk_annotations",
+        "indexes": ["assignment", "status"],
+    }
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class IntervalValidationAssignment(Document):
+    STATUS_ASSIGNED = "assigned"
+    STATUS_SUBMITTED = "submitted"
+
+    interval = ReferenceField(VideoInterval, required=True, reverse_delete_rule=CASCADE)
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    validator = ReferenceField(User, required=True, reverse_delete_rule=CASCADE)
+    decision = StringField(default="")
+    comment = StringField(default="")
+    status = StringField(required=True, default=STATUS_ASSIGNED, choices=[STATUS_ASSIGNED, STATUS_SUBMITTED])
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "cv_interval_validation_assignments",
+        "indexes": [{"fields": ["interval", "validator"], "unique": True}, "project", "validator", "status"],
+    }
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class BBoxValidationAssignment(Document):
+    STATUS_ASSIGNED = "assigned"
+    STATUS_SUBMITTED = "submitted"
+
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    validator = ReferenceField(User, required=True, reverse_delete_rule=CASCADE)
+    work_item_ids = ListField(StringField(), default=list)  # 20 real
+    golden_frame_ids = ListField(StringField(), default=list)  # 10 control
+    decisions = DictField(default=dict)  # key: work_item_id -> approve/needs_changes
+    golden_decisions = DictField(default=dict)  # key: frame_id -> approve/needs_changes
+    golden_score = FloatField(default=0.0)
+    status = StringField(required=True, default=STATUS_ASSIGNED, choices=[STATUS_ASSIGNED, STATUS_SUBMITTED])
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "cv_bbox_validation_assignments",
+        "indexes": ["project", "validator", "status"],
+    }
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
 class WorkItem(Document):
     STATUS_PENDING = "pending"
     STATUS_IN_REVIEW = "in_review"

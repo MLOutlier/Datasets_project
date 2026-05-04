@@ -8,12 +8,29 @@ import random
 import zipfile
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from bson import ObjectId
 from mongoengine import Q
 
 from apps.projects.models import Project, ProjectMembership
 from apps.users.models import User
-from ..models import Assignment, FrameItem, GoldenFrame, ImportAsset, ImportSession, ReviewRecord, WorkAnnotation, WorkItem, SecurityEvent
-from .frames import FrameExtractionError, extract_video_frames
+from ..models import (
+    Assignment,
+    BBoxValidationAssignment,
+    FrameItem,
+    GoldenFrame,
+    ImportAsset,
+    ImportSession,
+    IntervalValidationAssignment,
+    ReviewRecord,
+    VideoChunkAnnotation,
+    VideoChunkAssignment,
+    VideoChunkTask,
+    VideoInterval,
+    WorkAnnotation,
+    WorkItem,
+    SecurityEvent,
+)
+from .frames import FrameExtractionError, extract_video_frames, ffmpeg_diagnostics
 from .preannotation import generate_preannotation_for_frame
 from .security import log_security_event
 from .upload import absolute_media_path, image_dimensions
@@ -157,6 +174,7 @@ def build_import_preview(import_session: ImportSession) -> dict:
         "errors": [asset.error_message for asset in failed if asset.error_message],
         "sample_frames": [frame.frame_uri for frame in preview_frames],
         "cleanup": import_session.summary.get("cleanup", {}) if isinstance(import_session.summary, dict) else {},
+        "ffmpeg": ffmpeg_diagnostics(),
     }
 
 
@@ -186,6 +204,8 @@ def process_import_asset(asset: ImportAsset, interval_sec: float) -> ImportAsset
                 "frame_interval_sec": interval_sec,
                 "video_frames_extracted": len(extracted),
             }
+            asset.metadata["intervals"] = {"created": 0, "updated": 0, "intervals_total": 0, "mode": "manual_executor_stage"}
+            asset.metadata["chunk_tasks"] = create_video_chunk_tasks_for_asset(asset)
         asset.processing_status = ImportAsset.STATUS_PROCESSED
         asset.error_message = ""
     except FrameExtractionError as exc:
@@ -203,6 +223,316 @@ def process_import_asset(asset: ImportAsset, interval_sec: float) -> ImportAsset
         asset.metadata = {**(asset.metadata or {}), "cleanup": cleanup}
         asset.save()
     return asset
+
+
+def _interval_seconds(frame: FrameItem) -> float:
+    return float(frame.timestamp_sec or 0.0)
+
+
+def generate_auto_intervals_for_asset(asset: ImportAsset, created_by: User | None = None) -> dict:
+    if asset.asset_type != ImportAsset.TYPE_VIDEO:
+        return {"created": 0, "updated": 0, "intervals_total": 0}
+    frames = list(FrameItem.objects(project=asset.project, asset=asset).order_by("frame_number"))
+    if not frames:
+        return {"created": 0, "updated": 0, "intervals_total": 0}
+    # Simple heuristic baseline: split the video into "object candidate" windows.
+    # These drafts are always editable by humans on interval stage.
+    segment_size = 20
+    candidate_spans = []
+    for start in range(0, len(frames), segment_size):
+        end = min(start + segment_size - 1, len(frames) - 1)
+        if (start // segment_size) % 2 == 0:
+            candidate_spans.append((start, end))
+    created = 0
+    updated = 0
+    existing = list(VideoInterval.objects(project=asset.project, asset=asset, source=VideoInterval.SOURCE_AUTO))
+    for item in existing:
+        item.delete()
+    for start_idx, end_idx in candidate_spans:
+        start_frame = frames[start_idx]
+        end_frame = frames[end_idx]
+        VideoInterval(
+            project=asset.project,
+            asset=asset,
+            start_frame=start_frame.frame_number,
+            end_frame=end_frame.frame_number,
+            start_sec=_interval_seconds(start_frame),
+            end_sec=_interval_seconds(end_frame),
+            status=VideoInterval.STATUS_DRAFT,
+            source=VideoInterval.SOURCE_AUTO,
+            confidence=0.6,
+            created_by=created_by,
+        ).save()
+        created += 1
+    return {"created": created, "updated": updated, "intervals_total": created}
+
+
+def list_video_intervals(project: Project, asset: ImportAsset | None = None, status: str | None = None) -> List[VideoInterval]:
+    query = {"project": project}
+    if asset:
+        query["asset"] = asset
+    if status:
+        query["status"] = status
+    return list(VideoInterval.objects(**query).order_by("asset", "start_frame", "created_at"))
+
+
+def upsert_video_intervals(project: Project, asset: ImportAsset, actor: User, intervals: List[dict]) -> dict:
+    created = 0
+    updated = 0
+    for payload in intervals:
+        interval_id = str(payload.get("id") or "").strip()
+        interval = (
+            VideoInterval.objects(id=ObjectId(interval_id), project=project, asset=asset).first()
+            if interval_id
+            else None
+        )
+        if not interval:
+            interval = VideoInterval(project=project, asset=asset, created_by=actor)
+            created += 1
+        else:
+            updated += 1
+        interval.start_frame = int(payload["start_frame"])
+        interval.end_frame = int(payload["end_frame"])
+        frame_start = FrameItem.objects(project=project, asset=asset, frame_number=interval.start_frame).first()
+        frame_end = FrameItem.objects(project=project, asset=asset, frame_number=interval.end_frame).first()
+        interval.start_sec = _interval_seconds(frame_start) if frame_start else 0.0
+        interval.end_sec = _interval_seconds(frame_end) if frame_end else interval.start_sec
+        interval.source = str(payload.get("source") or VideoInterval.SOURCE_MANUAL)
+        interval.confidence = float(payload.get("confidence") or 0.0)
+        interval.metadata = payload.get("metadata") or {}
+        interval.status = VideoInterval.STATUS_DRAFT
+        interval.validated_at = None
+        interval.validated_by = None
+        interval.save()
+    return {"created": created, "updated": updated}
+
+
+def validate_video_intervals(project: Project, actor: User, interval_ids: List[str], decision: str, comment: str = "") -> dict:
+    updated = 0
+    for interval in VideoInterval.objects(project=project, id__in=[ObjectId(item) for item in interval_ids]):
+        interval.status = decision
+        interval.validated_by = actor
+        interval.validated_at = datetime.utcnow()
+        interval.metadata = {**(interval.metadata or {}), "validation_comment": comment}
+        interval.save()
+        updated += 1
+    return {"updated": updated, "decision": decision}
+
+
+def create_video_chunk_tasks_for_asset(asset: ImportAsset, chunk_size_frames: int = 300) -> dict:
+    if asset.asset_type != ImportAsset.TYPE_VIDEO:
+        return {"tasks_created": 0, "assignments_created": 0}
+    project = asset.project
+    frames = list(FrameItem.objects(project=project, asset=asset).order_by("frame_number"))
+    if not frames:
+        return {"tasks_created": 0, "assignments_created": 0}
+    existing = list(VideoChunkTask.objects(project=project, asset=asset))
+    for task in existing:
+        assignments = list(VideoChunkAssignment.objects(task=task))
+        if assignments:
+            VideoChunkAnnotation.objects(assignment__in=assignments).delete()
+            VideoChunkAssignment.objects(id__in=[item.id for item in assignments]).delete()
+        task.delete()
+    tasks_created = 0
+    assignments_created = 0
+    annotators = select_annotators_for_project(project, max(1, int(project.assignments_per_task or 1)))
+    for chunk_index, start in enumerate(range(0, len(frames), chunk_size_frames)):
+        end = min(start + chunk_size_frames - 1, len(frames) - 1)
+        task = VideoChunkTask(
+            project=project,
+            asset=asset,
+            chunk_index=chunk_index,
+            start_frame=int(frames[start].frame_number),
+            end_frame=int(frames[end].frame_number),
+            required_annotations=1,
+        )
+        task.save()
+        tasks_created += 1
+        for annotator in annotators[:1]:
+            VideoChunkAssignment(task=task, project=project, annotator=annotator).save()
+            assignments_created += 1
+    return {"tasks_created": tasks_created, "assignments_created": assignments_created}
+
+
+def annotator_interval_chunk_queue(annotator: User) -> List[dict]:
+    assignments = list(
+        VideoChunkAssignment.objects(
+            annotator=annotator,
+            status__in=[VideoChunkAssignment.STATUS_ASSIGNED, VideoChunkAssignment.STATUS_IN_PROGRESS],
+        ).order_by("created_at")
+    )
+    return [
+        {
+            "assignment_id": str(item.id),
+            "task_id": str(item.task.id),
+            "project_id": str(item.project.id),
+            "project_title": item.project.title,
+            "asset_id": str(item.task.asset.id),
+            "asset_uri": item.task.asset.file_uri,
+            "start_frame": item.task.start_frame,
+            "end_frame": item.task.end_frame,
+            "frame_interval_sec": float(item.project.frame_interval_sec or 1.0),
+            "status": item.status,
+        }
+        for item in assignments
+    ]
+
+
+def submit_interval_chunk_assignment(assignment: VideoChunkAssignment, intervals: List[dict], comment: str = "") -> dict:
+    if assignment.status == VideoChunkAssignment.STATUS_ASSIGNED:
+        assignment.status = VideoChunkAssignment.STATUS_IN_PROGRESS
+    assignment.save()
+    annotation = VideoChunkAnnotation.objects(assignment=assignment).first()
+    if not annotation:
+        annotation = VideoChunkAnnotation(assignment=assignment)
+    annotation.intervals = intervals
+    annotation.comment = comment
+    annotation.status = VideoChunkAnnotation.STATUS_SUBMITTED
+    annotation.save()
+    assignment.status = VideoChunkAssignment.STATUS_SUBMITTED
+    assignment.save()
+    created_intervals = 0
+    for entry in intervals:
+        start_frame = int(entry["start_frame"])
+        end_frame = int(entry["end_frame"])
+        start_obj = FrameItem.objects(project=assignment.project, asset=assignment.task.asset, frame_number=start_frame).first()
+        end_obj = FrameItem.objects(project=assignment.project, asset=assignment.task.asset, frame_number=end_frame).first()
+        interval = VideoInterval(
+            project=assignment.project,
+            asset=assignment.task.asset,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            start_sec=float(start_obj.timestamp_sec if start_obj else 0.0),
+            end_sec=float(end_obj.timestamp_sec if end_obj else 0.0),
+            status=VideoInterval.STATUS_DRAFT,
+            source=VideoInterval.SOURCE_MANUAL,
+            confidence=float(entry.get("confidence") or 0.0),
+            metadata={"chunk_task_id": str(assignment.task.id)},
+            created_by=assignment.annotator,
+        )
+        interval.save()
+        created_intervals += 1
+    assignment.task.status = VideoChunkTask.STATUS_COMPLETED
+    assignment.task.save()
+    return {"annotation_id": str(annotation.id), "intervals_created": created_intervals}
+
+
+def ensure_interval_validation_assignments(project: Project, min_validators: int = 3) -> int:
+    created = 0
+    intervals = list(VideoInterval.objects(project=project, status=VideoInterval.STATUS_DRAFT))
+    for interval in intervals:
+        if not interval.created_by:
+            continue
+        existing = list(IntervalValidationAssignment.objects(interval=interval))
+        existing_validator_ids = {str(item.validator.id) for item in existing}
+        candidates = [
+            user
+            for user in select_annotators_for_project(project, max(10, min_validators * 3))
+            if str(user.id) != str(interval.created_by.id if interval.created_by else "")
+            and str(user.id) not in existing_validator_ids
+        ]
+        for validator in candidates[: max(0, min_validators - len(existing))]:
+            IntervalValidationAssignment(interval=interval, project=project, validator=validator).save()
+            created += 1
+    return created
+
+
+def validator_interval_queue(validator: User) -> List[dict]:
+    assignments = [
+        assignment
+        for assignment in IntervalValidationAssignment.objects(validator=validator, status=IntervalValidationAssignment.STATUS_ASSIGNED).order_by("created_at")
+        if assignment.interval.created_by and str(assignment.interval.created_by.id) != str(validator.id)
+    ]
+    return [
+        {
+            "assignment_id": str(item.id),
+            "interval_id": str(item.interval.id),
+            "project_id": str(item.project.id),
+            "project_title": item.project.title,
+            "asset_id": str(item.interval.asset.id),
+            "asset_uri": item.interval.asset.file_uri,
+            "start_frame": item.interval.start_frame,
+            "end_frame": item.interval.end_frame,
+            "start_sec": float(item.interval.start_sec or 0.0),
+            "end_sec": float(item.interval.end_sec or 0.0),
+            "frame_interval_sec": float(item.project.frame_interval_sec or 1.0),
+            "status": item.status,
+        }
+        for item in assignments
+    ]
+
+
+def submit_interval_validation(assignment: IntervalValidationAssignment, decision: str, comment: str = "", min_validators: int = 3) -> dict:
+    if not assignment.interval.created_by:
+        assignment.status = IntervalValidationAssignment.STATUS_SUBMITTED
+        assignment.comment = "Skipped auto interval without human author"
+        assignment.save()
+        return {"assignment_id": str(assignment.id), "interval_status": assignment.interval.status, "skipped": True}
+    assignment.decision = decision
+    assignment.comment = comment
+    assignment.status = IntervalValidationAssignment.STATUS_SUBMITTED
+    assignment.save()
+    interval = assignment.interval
+    votes = list(IntervalValidationAssignment.objects(interval=interval, status=IntervalValidationAssignment.STATUS_SUBMITTED))
+    if len(votes) >= min_validators:
+        approvals = sum(1 for vote in votes if vote.decision == VideoInterval.STATUS_APPROVED)
+        rejects = len(votes) - approvals
+        interval.status = VideoInterval.STATUS_APPROVED if approvals >= rejects else VideoInterval.STATUS_REJECTED
+        interval.validated_at = datetime.utcnow()
+        interval.metadata = {
+            **(interval.metadata or {}),
+            "validation_votes": len(votes),
+            "validation_approved": approvals,
+            "validation_rejected": rejects,
+        }
+        interval.save()
+        if interval.status == VideoInterval.STATUS_APPROVED:
+            _create_work_items_from_approved_interval(interval)
+    return {"assignment_id": str(assignment.id), "interval_status": interval.status}
+
+
+def _create_work_items_from_approved_interval(interval: VideoInterval) -> int:
+    project = interval.project
+    asset = interval.asset
+    created = 0
+    queue_position = _next_queue_position(project)
+    frames = list(
+        FrameItem.objects(project=project, asset=asset, frame_number__gte=interval.start_frame, frame_number__lte=interval.end_frame).order_by("frame_number")
+    )
+    batch_entries = _build_asset_batches(asset, frames, project)
+    required_assignments = max(1, int(project.assignments_per_task or 1))
+    candidate_annotators = select_annotators_for_project(project, max(required_assignments, 50))
+    local_assignment_counts = {str(user.id): 0 for user in candidate_annotators}
+    for entry in batch_entries:
+        frame = entry["frame"]
+        workflow_meta = entry["workflow_meta"]
+        work_item = WorkItem.objects(project=project, frame=frame).first()
+        if not work_item:
+            work_item = WorkItem(project=project, frame=frame, workflow_meta=workflow_meta)
+            work_item.validation_status = WorkItem.VALIDATION_PENDING
+            work_item.save()
+            created += 1
+        existing_annotators = {str(a.annotator.id) for a in Assignment.objects(work_item=work_item)}
+        next_order = Assignment.objects(work_item=work_item).count()
+        selected_annotators = sorted(
+            [user for user in candidate_annotators if str(user.id) not in existing_annotators],
+            key=lambda user: (local_assignment_counts.get(str(user.id), 0), str(user.id)),
+        )[: max(0, required_assignments - len(existing_annotators))]
+        for annotator in selected_annotators:
+            if str(annotator.id) in existing_annotators:
+                continue
+            Assignment(
+                project=project,
+                work_item=work_item,
+                annotator=annotator,
+                order_index=next_order,
+                queue_position=queue_position,
+                status=Assignment.STATUS_ASSIGNED,
+            ).save()
+            local_assignment_counts[str(annotator.id)] = local_assignment_counts.get(str(annotator.id), 0) + 1
+            next_order += 1
+            queue_position += 1
+    return created
 
 
 def _file_sha256(file_uri: str) -> str:
@@ -413,7 +743,18 @@ def create_work_items_for_import(import_session: ImportSession) -> Dict[str, int
     validation_ready_items = 0
     queue_position = _next_queue_position(project)
     for asset in processed_assets:
-        asset_frames = list(FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at"))
+        if asset.asset_type == ImportAsset.TYPE_VIDEO:
+            approved_intervals = list(
+                VideoInterval.objects(project=project, asset=asset, status=VideoInterval.STATUS_APPROVED).order_by("start_frame")
+            )
+            approved_ranges = [(int(interval.start_frame), int(interval.end_frame)) for interval in approved_intervals]
+            asset_frames = [
+                frame
+                for frame in FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at")
+                if any(start <= int(frame.frame_number) <= end for start, end in approved_ranges)
+            ]
+        else:
+            asset_frames = list(FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at"))
         batch_entries = _build_asset_batches(asset, asset_frames, project)
         if batch_entries:
             workflow_batches_total += max(int(item["workflow_meta"]["task_batch_number"]) for item in batch_entries)
@@ -631,7 +972,7 @@ def evaluate_work_item(work_item: WorkItem) -> Optional[dict]:
             update_user_quality(annotation.annotator, consensus_f1, disputed=False)
         _run_video_qc_for_work_item(work_item)
         return {"state": "accepted", "metrics": {"f1": consensus_f1, "pairs": pair_metrics}}
-    requeued_assignments = requeue_low_agreement_work_item(work_item, annotations, consensus_f1)
+    requeued_assignments = requeue_low_agreement_work_item(work_item, annotations, consensus_f1, pair_metrics=pair_metrics)
     return {
         "state": "requeued",
         "metrics": {"f1": consensus_f1, "pairs": pair_metrics},
@@ -639,84 +980,8 @@ def evaluate_work_item(work_item: WorkItem) -> Optional[dict]:
     }
 
 
-def requeue_low_agreement_work_item(work_item: WorkItem, annotations: List[WorkAnnotation], consensus_f1: float) -> int:
-    project = work_item.project
-    existing_assignments = list(Assignment.objects(work_item=work_item).order_by("order_index", "created_at"))
-    submitted_by_id = {str(annotation.assignment.id): annotation for annotation in annotations}
-
-    for assignment in existing_assignments:
-        annotation = submitted_by_id.get(str(assignment.id)) or WorkAnnotation.objects(assignment=assignment).first()
-        if annotation:
-            annotation.status = WorkAnnotation.STATUS_REJECTED
-            annotation.is_final = False
-            annotation.save()
-        assignment.status = Assignment.STATUS_DISPUTED
-        assignment.quality_signals = {
-            **(assignment.quality_signals or {}),
-            "low_agreement_requeue": True,
-            "consensus_f1": consensus_f1,
-        }
-        assignment.save()
-        if annotation and annotation.annotator:
-            update_user_quality(annotation.annotator, consensus_f1, disputed=True)
-
-    work_item.status = WorkItem.STATUS_PENDING
-    work_item.review_required = False
-    work_item.review_status = "requeued_low_agreement"
-    work_item.final_annotation = {}
-    work_item.final_source = ""
-    work_item.save()
-
-    required_assignments = max(1, int(project.assignments_per_task or 1))
-    queue_position = _next_queue_position(project)
-    existing_annotator_ids = {str(item.annotator.id) for item in existing_assignments}
-    fresh_candidates = [
-        user
-        for user in select_annotators_for_project(project, max(required_assignments * 3, len(existing_assignments) + required_assignments))
-        if str(user.id) not in existing_annotator_ids
-    ]
-
-    created = 0
-    next_order = Assignment.objects(work_item=work_item).count()
-    for annotator in fresh_candidates[:required_assignments]:
-        Assignment(
-            project=project,
-            work_item=work_item,
-            annotator=annotator,
-            order_index=next_order,
-            queue_position=queue_position,
-            status=Assignment.STATUS_ASSIGNED,
-        ).save()
-        created += 1
-        next_order += 1
-        queue_position += 1
-        log_security_event(
-            project=project,
-            event_type=SecurityEvent.EVENT_ASSIGNMENT_DISTRIBUTION,
-            payload={
-                "work_item_id": str(work_item.id),
-                "annotator_id": str(annotator.id),
-                "reason": "low_agreement_requeue",
-            },
-            severity="warning",
-        )
-
-    if created < required_assignments:
-        reusable_assignments = sorted(existing_assignments, key=lambda item: (item.order_index, item.created_at))
-        for assignment in reusable_assignments[: required_assignments - created]:
-            assignment.status = Assignment.STATUS_ASSIGNED
-            assignment.started_at = None
-            assignment.submitted_at = None
-            assignment.queue_position = queue_position
-            assignment.quality_signals = {
-                **(assignment.quality_signals or {}),
-                "requeue_count": int((assignment.quality_signals or {}).get("requeue_count") or 0) + 1,
-            }
-            assignment.save()
-            queue_position += 1
-            created += 1
-
-    return created
+def requeue_low_agreement_work_item(work_item: WorkItem, annotations: List[WorkAnnotation], consensus_f1: float, pair_metrics: List[dict] | None = None) -> int:
+    return requeue_work_item_for_validation(work_item, actor=None, reason="low_agreement")
 
 
 def requeue_work_item_for_validation(work_item: WorkItem, actor: User | None = None, reason: str = "validation_needs_changes") -> int:
@@ -824,6 +1089,214 @@ def resolve_validation_batch(project: Project, task_batch_id: str, actor: User, 
     }
 
 
+def _ensure_golden_frames(project: Project, target_count: int = 10) -> List[GoldenFrame]:
+    active = list(GoldenFrame.objects(project=project, is_active=True).order_by("created_at"))
+    if len(active) >= target_count:
+        return active
+
+    existing_frame_ids = {str(item.frame.id) for item in active}
+    candidates = list(
+        WorkItem.objects(
+            project=project,
+            status=WorkItem.STATUS_COMPLETED,
+        ).order_by("created_at")
+    )
+    for work_item in candidates:
+        if len(active) >= target_count:
+            break
+        if str(work_item.frame.id) in existing_frame_ids:
+            continue
+        reference = work_item.final_annotation or {}
+        GoldenFrame(project=project, frame=work_item.frame, reference_annotation=reference).save()
+        active.append(GoldenFrame.objects(project=project, frame=work_item.frame, is_active=True).first())
+        existing_frame_ids.add(str(work_item.frame.id))
+    return [item for item in active if item]
+
+
+def _bbox_validation_real_payload(work_item: WorkItem) -> dict:
+    return _work_item_payload(work_item)
+
+
+def _bbox_validation_golden_payload(golden: GoldenFrame) -> dict:
+    frame = golden.frame
+    return {
+        "golden_id": str(golden.id),
+        "frame_id": str(frame.id),
+        "frame_url": frame.frame_uri,
+        "frame_number": frame.frame_number,
+        "timestamp_sec": frame.timestamp_sec,
+        "width": frame.width,
+        "height": frame.height,
+        "candidate_annotation": {"boxes": _normalize_boxes(golden.reference_annotation)},
+    }
+
+
+def ensure_bbox_validation_assignments(project: Project, min_validators: int = 3, real_items_per_batch: int = 20, golden_items_per_batch: int = 10) -> int:
+    completed_items = list(
+        WorkItem.objects(
+            project=project,
+            status=WorkItem.STATUS_COMPLETED,
+            validation_status=WorkItem.VALIDATION_PENDING,
+        ).order_by("created_at")
+    )
+    if not completed_items:
+        return 0
+    created = 0
+    golden_frames = _ensure_golden_frames(project, golden_items_per_batch)
+    for start in range(0, len(completed_items), real_items_per_batch):
+        items = completed_items[start : start + real_items_per_batch]
+        candidates = [
+            user
+            for user in select_annotators_for_project(project, max(15, min_validators * 3))
+        ]
+        for validator in candidates:
+            eligible_items = []
+            for item in items:
+                authored = WorkAnnotation.objects(
+                    work_item=item,
+                    annotator=validator,
+                    status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED],
+                ).first()
+                if not authored:
+                    eligible_items.append(item)
+            real_ids = [str(item.id) for item in eligible_items[:real_items_per_batch]]
+            if not real_ids:
+                continue
+            existing = BBoxValidationAssignment.objects(project=project, validator=validator, work_item_ids=real_ids).first()
+            if existing:
+                continue
+            golden_ids = [str(frame.id) for frame in golden_frames[:golden_items_per_batch]]
+            BBoxValidationAssignment(
+                project=project,
+                validator=validator,
+                work_item_ids=real_ids,
+                golden_frame_ids=golden_ids,
+                status=BBoxValidationAssignment.STATUS_ASSIGNED,
+            ).save()
+            created += 1
+    return created
+
+
+def _required_bbox_validation_votes(work_item: WorkItem, min_validators: int = 3) -> int:
+    authors = {
+        str(annotation.annotator.id)
+        for annotation in WorkAnnotation.objects(work_item=work_item, status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED])
+        if annotation.annotator
+    }
+    candidates = select_annotators_for_project(work_item.project, 50)
+    eligible = [user for user in candidates if str(user.id) not in authors]
+    return max(1, min(min_validators, len(eligible)))
+
+
+def bbox_validation_queue_for_annotator(user: User) -> List[dict]:
+    assignments = list(BBoxValidationAssignment.objects(validator=user, status=BBoxValidationAssignment.STATUS_ASSIGNED).order_by("created_at"))
+    payload = []
+    for item in assignments:
+        real_items = [
+            work_item
+            for work_item in WorkItem.objects(project=item.project, id__in=[ObjectId(work_item_id) for work_item_id in item.work_item_ids if ObjectId.is_valid(work_item_id)])
+        ]
+        real_lookup = {str(work_item.id): work_item for work_item in real_items}
+        ordered_real = [real_lookup[work_item_id] for work_item_id in item.work_item_ids if work_item_id in real_lookup]
+        golden_items = [
+            golden
+            for golden in GoldenFrame.objects(project=item.project, id__in=[ObjectId(golden_id) for golden_id in item.golden_frame_ids if ObjectId.is_valid(golden_id)], is_active=True)
+        ]
+        golden_lookup = {str(golden.id): golden for golden in golden_items}
+        ordered_golden = [golden_lookup[golden_id] for golden_id in item.golden_frame_ids if golden_id in golden_lookup]
+        payload.append(
+            {
+                "assignment_id": str(item.id),
+                "project_id": str(item.project.id),
+                "project_title": item.project.title,
+                "real_items": item.work_item_ids,
+                "golden_items": item.golden_frame_ids,
+                "real_item_details": [_bbox_validation_real_payload(work_item) for work_item in ordered_real],
+                "golden_item_details": [_bbox_validation_golden_payload(golden) for golden in ordered_golden],
+                "real_count": len(item.work_item_ids),
+                "golden_count": len(item.golden_frame_ids),
+            }
+        )
+    return payload
+
+
+def submit_bbox_validation_assignment(
+    assignment: BBoxValidationAssignment,
+    decisions: Dict[str, str],
+    golden_decisions: Dict[str, str],
+    min_score: float = 0.8,
+) -> dict:
+    golden_frames = list(
+        GoldenFrame.objects(
+            project=assignment.project,
+            id__in=[ObjectId(golden_id) for golden_id in assignment.golden_frame_ids if ObjectId.is_valid(golden_id)],
+            is_active=True,
+        )
+    )
+    golden_total = max(len(golden_frames), 1)
+    golden_correct = 0
+    for golden in golden_frames:
+        decision = str(golden_decisions.get(str(golden.id), "")).strip().lower()
+        reference_boxes = _normalize_boxes(golden.reference_annotation)
+        expected_decision = "approve" if reference_boxes or golden.reference_annotation == {"boxes": []} else "needs_changes"
+        if decision == expected_decision:
+            golden_correct += 1
+    score = round(golden_correct / golden_total, 4)
+    assignment.decisions = decisions
+    assignment.golden_decisions = golden_decisions
+    assignment.golden_score = score
+    assignment.status = BBoxValidationAssignment.STATUS_SUBMITTED
+    assignment.save()
+    if score < min_score:
+        return {"assignment_id": str(assignment.id), "status": "rejected_by_golden", "golden_score": score}
+    approved_count = 0
+    requeued_count = 0
+    pending_count = 0
+    for work_item_id in assignment.work_item_ids:
+        if not ObjectId.is_valid(work_item_id):
+            continue
+        work_item = WorkItem.objects(id=ObjectId(work_item_id), project=assignment.project).first()
+        if not work_item:
+            continue
+        decision = str(decisions.get(work_item_id, "approve")).strip().lower()
+        validators_meta = (work_item.workflow_meta or {}).get("bbox_validation_votes") or []
+        validators_meta.append({"validator_id": str(assignment.validator.id), "decision": decision})
+        meta = work_item.workflow_meta or {}
+        meta["bbox_validation_votes"] = validators_meta
+        work_item.workflow_meta = meta
+
+        submitted_votes = [
+            vote
+            for vote in validators_meta
+            if str(vote.get("decision") or "").strip().lower() in {"approve", "needs_changes"}
+        ]
+        required_votes = _required_bbox_validation_votes(work_item, min_validators=3)
+        if len(submitted_votes) < required_votes:
+            work_item.save()
+            pending_count += 1
+            continue
+
+        needs_changes_votes = sum(1 for vote in submitted_votes if vote.get("decision") == "needs_changes")
+        approve_votes = len(submitted_votes) - needs_changes_votes
+        if needs_changes_votes > approve_votes:
+            requeue_work_item_for_validation(work_item, actor=assignment.validator, reason="bbox_validation_needs_changes")
+            requeued_count += 1
+        else:
+            work_item.validation_status = WorkItem.VALIDATION_APPROVED
+            work_item.validated_by = assignment.validator
+            work_item.validated_at = datetime.utcnow()
+            work_item.save()
+            approved_count += 1
+    return {
+        "assignment_id": str(assignment.id),
+        "status": "submitted",
+        "golden_score": score,
+        "approved_items": approved_count,
+        "requeued_items": requeued_count,
+        "pending_items": pending_count,
+    }
+
+
 def save_assignment_annotation(assignment: Assignment, label_data: dict, comment: str, is_final: bool) -> Tuple[WorkAnnotation, Optional[dict]]:
     now = datetime.utcnow()
     if not assignment.started_at:
@@ -849,6 +1322,13 @@ def save_assignment_annotation(assignment: Assignment, label_data: dict, comment
     annotation.save()
 
     evaluation = evaluate_work_item(assignment.work_item) if is_final else None
+    if is_final and evaluation and evaluation.get("state") == "accepted":
+        ensure_bbox_validation_assignments(
+            project=assignment.project,
+            min_validators=3,
+            real_items_per_batch=20,
+            golden_items_per_batch=10,
+        )
     return annotation, evaluation
 
 
@@ -955,6 +1435,7 @@ def project_overview(project: Project) -> dict:
     work_items = list(WorkItem.objects(project=project))
     assignments = list(Assignment.objects(project=project))
     reviews = list(ReviewRecord.objects(project=project))
+    intervals = list(VideoInterval.objects(project=project))
     annotator_stats = []
     for membership in ProjectMembership.objects(project=project, role=ProjectMembership.ROLE_ANNOTATOR, is_active=True):
         user_assignments = [assignment for assignment in assignments if str(assignment.annotator.id) == str(membership.user.id)]
@@ -982,7 +1463,17 @@ def project_overview(project: Project) -> dict:
             "ready": sum(1 for import_session in imports if import_session.status == ImportSession.STATUS_READY),
             "finalized": sum(1 for import_session in imports if import_session.status == ImportSession.STATUS_FINALIZED),
             "failed": sum(1 for import_session in imports if import_session.status == ImportSession.STATUS_FAILED),
+            "latest_ready_import_id": str(
+                sorted(
+                    [import_session for import_session in imports if import_session.status == ImportSession.STATUS_READY],
+                    key=lambda import_session: import_session.updated_at or import_session.created_at,
+                    reverse=True,
+                )[0].id
+            )
+            if any(import_session.status == ImportSession.STATUS_READY for import_session in imports)
+            else "",
             "assets_total": len(assets),
+            "video_asset_ids": [str(asset.id) for asset in assets if asset.asset_type == ImportAsset.TYPE_VIDEO],
             "assets_failed": sum(1 for asset in assets if asset.processing_status == ImportAsset.STATUS_FAILED),
             "frames_total": sum(asset.frame_count for asset in assets),
         },
@@ -997,6 +1488,12 @@ def project_overview(project: Project) -> dict:
             "average_agreement": round(sum(item.agreement_score for item in work_items) / len(work_items), 4) if work_items else 0.0,
             "workflow_batches_total": len({item.workflow_meta.get("task_batch_id") for item in work_items if item.workflow_meta.get("task_batch_id")}),
             "validation_ready_items": sum(1 for item in work_items if item.workflow_meta.get("validation_ready")),
+        },
+        "intervals": {
+            "total": len(intervals),
+            "draft": sum(1 for item in intervals if item.status == VideoInterval.STATUS_DRAFT),
+            "approved": sum(1 for item in intervals if item.status == VideoInterval.STATUS_APPROVED),
+            "rejected": sum(1 for item in intervals if item.status == VideoInterval.STATUS_REJECTED),
         },
         "assignments": {
             "total": len(assignments),
@@ -1149,6 +1646,74 @@ def _build_yolo_export(project: Project, completed_items: List[WorkItem]) -> dic
     }
 
 
+def _build_voc_export(completed_items: List[WorkItem]) -> dict:
+    records: List[dict] = []
+    for work_item in completed_items:
+        frame = work_item.frame
+        objects = []
+        for box in _normalize_boxes(work_item.final_annotation):
+            objects.append(
+                {
+                    "name": box["label"],
+                    "bndbox": {
+                        "xmin": int(round(box["x"])),
+                        "ymin": int(round(box["y"])),
+                        "xmax": int(round(box["x"] + box["width"])),
+                        "ymax": int(round(box["y"] + box["height"])),
+                    },
+                }
+            )
+        records.append(
+            {
+                "filename": frame.frame_uri,
+                "size": {"width": frame.width, "height": frame.height, "depth": 3},
+                "objects": objects,
+            }
+        )
+    return {"records": records}
+
+
+def _build_csv_export(completed_items: List[WorkItem]) -> List[dict]:
+    rows: List[dict] = []
+    for work_item in completed_items:
+        frame = work_item.frame
+        boxes = _normalize_boxes(work_item.final_annotation)
+        if not boxes:
+            rows.append(
+                {
+                    "work_item_id": str(work_item.id),
+                    "frame_id": str(frame.id),
+                    "frame_uri": frame.frame_uri,
+                    "frame_number": frame.frame_number,
+                    "timestamp_sec": frame.timestamp_sec,
+                    "label": "",
+                    "x": "",
+                    "y": "",
+                    "width": "",
+                    "height": "",
+                    "validation_status": work_item.validation_status,
+                }
+            )
+            continue
+        for box in boxes:
+            rows.append(
+                {
+                    "work_item_id": str(work_item.id),
+                    "frame_id": str(frame.id),
+                    "frame_uri": frame.frame_uri,
+                    "frame_number": frame.frame_number,
+                    "timestamp_sec": frame.timestamp_sec,
+                    "label": box["label"],
+                    "x": box["x"],
+                    "y": box["y"],
+                    "width": box["width"],
+                    "height": box["height"],
+                    "validation_status": work_item.validation_status,
+                }
+            )
+    return rows
+
+
 def build_dataset_export(project: Project, export_format: str = "both") -> dict:
     completed_items = list(WorkItem.objects(project=project, status=WorkItem.STATUS_COMPLETED))
     assignments = list(Assignment.objects(project=project))
@@ -1166,6 +1731,10 @@ def build_dataset_export(project: Project, export_format: str = "both") -> dict:
         payload.update(_build_coco_export(project, completed_items))
     if export_format in {"yolo", "both"}:
         payload["yolo"] = _build_yolo_export(project, completed_items)
+    if export_format in {"voc", "both"}:
+        payload["voc"] = _build_voc_export(completed_items)
+    if export_format in {"csv", "both"}:
+        payload["csv"] = _build_csv_export(completed_items)
     return payload
 
 
@@ -1182,6 +1751,17 @@ def build_dataset_export_archive(project: Project, export_format: str = "both") 
             bundle.writestr("annotations/yolo/data.yaml", json.dumps(yolo.get("data_yaml", {}), ensure_ascii=False, indent=2))
             for record in yolo.get("records", []):
                 bundle.writestr(f"annotations/yolo/{record['label_file']}", "\n".join(record.get("lines", [])))
+        if "voc" in payload:
+            bundle.writestr("annotations/voc/voc.json", json.dumps(payload["voc"], ensure_ascii=False, indent=2))
+        if "csv" in payload:
+            csv_rows = payload["csv"]
+            if csv_rows:
+                headers = list(csv_rows[0].keys())
+                lines = [",".join(headers)]
+                for row in csv_rows:
+                    values = [str(row.get(column, "")) for column in headers]
+                    lines.append(",".join(values))
+                bundle.writestr("annotations/csv/annotations.csv", "\n".join(lines))
         for item in payload.get("manifest", []):
             frame_uri = item.get("frame_uri")
             if not frame_uri:
