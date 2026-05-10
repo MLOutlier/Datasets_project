@@ -1,4 +1,4 @@
-export type Role = "customer" | "annotator" | "admin";
+export type Role = "customer" | "annotator" | "reviewer" | "admin";
 
 export interface User {
   id: string;
@@ -33,6 +33,7 @@ export type TaskStatus = "pending" | "in_progress" | "review" | "completed" | "r
 
 export interface Task {
   id: string;
+  title?: string;
   project_id?: string | null;
   dataset_id: string;
   annotator_id?: string | null;
@@ -184,6 +185,7 @@ export interface ProjectParticipantRules {
   specialization?: string;
   group?: string;
   assignment_scope?: "all" | "specialists" | "group_only" | "selected_only";
+  stage_pools?: Record<string, string[]>;
   ai_prelabel_enabled?: boolean;
   ai_model?: string;
   ai_confidence_threshold?: number;
@@ -191,6 +193,52 @@ export interface ProjectParticipantRules {
   tracking_algorithm?: string;
   task_batch_size?: number;
   min_sequence_size?: number;
+  interval_annotators_per_chunk?: number;
+  interval_validators_per_item?: number;
+  bbox_validators_per_batch?: number;
+  bbox_real_items_per_batch?: number;
+  bbox_golden_items_per_batch?: number;
+  golden_min_score?: number;
+  golden_candidate_threshold?: number;
+  golden_promotion_target?: number;
+  interval_review_padding_sec?: number;
+  stuck_assignment_ttl_minutes?: number;
+}
+
+export interface VideoInterval {
+  id: string;
+  asset_id: string;
+  status: "draft" | "approved" | "rejected" | string;
+  source: "auto" | "manual" | string;
+  confidence: number;
+  start_frame: number;
+  end_frame: number;
+  start_sec: number;
+  end_sec: number;
+  metadata?: Record<string, unknown>;
+  validated_at?: string | null;
+}
+
+export interface GoldenCandidate {
+  golden_frame_id: string;
+  frame_id: string;
+  frame_url: string;
+  frame_number: number;
+  timestamp_sec: number;
+  width: number;
+  height: number;
+  candidate_score: number;
+  candidate_source: string;
+  is_active: boolean;
+  is_candidate: boolean;
+  promoted_at?: string | null;
+  review_notes?: string;
+  reference_annotation: Record<string, unknown>;
+}
+
+export interface GoldenCandidatesResponse extends ApiListResponse<GoldenCandidate> {
+  active_count: number;
+  candidate_count: number;
 }
 
 export interface Project {
@@ -254,6 +302,10 @@ export interface ProjectImportResponse {
       invalid_frames_removed?: number;
       duplicate_assets?: string[];
     };
+    ffmpeg?: {
+      available: boolean;
+      message: string;
+    };
   };
 }
 
@@ -272,10 +324,20 @@ export interface ProjectOverview {
     project_type: string;
     annotation_type: string;
   };
-  imports: Record<string, number>;
-  work_items: Record<string, number>;
-  assignments: Record<string, number>;
-  reviews: Record<string, number>;
+  imports: Record<string, unknown>;
+  work_items: Record<string, unknown>;
+  assignments: Record<string, unknown>;
+  reviews: Record<string, unknown>;
+  sync?: {
+    recovered_assignments: number;
+    interval_annotation_created: number;
+    bbox_annotation_created: number;
+    evaluated_items: number;
+    accepted_items: number;
+    requeued_or_blocked_items: number;
+    interval_validation_created: number;
+    bbox_validation_created: number;
+  };
   annotators: Array<{
     user_id: string;
     username: string;
@@ -308,8 +370,14 @@ export interface QueueItem {
 }
 
 export interface AnnotatorProjectSummary {
+  stage_project_id?: string;
+  parent_project_id?: string;
   project_id: string;
   project_title: string;
+  stage?: "interval_annotation" | "interval_validation" | "bbox_annotation" | "bbox_validation" | string;
+  stage_title?: string;
+  linked_project_title?: string;
+  route?: string;
   project_status: string;
   instructions: string;
   instructions_file_uri?: string;
@@ -362,6 +430,12 @@ export interface AnnotatorProjectDetail {
     validation_pending_count?: number;
     validation_approved_count?: number;
     validation_needs_changes_count?: number;
+    interval_chunk_count?: number;
+    interval_validation_count?: number;
+    bbox_validation_count?: number;
+    interval_agreement?: number;
+    bbox_annotation_agreement?: number;
+    bbox_validation_agreement?: number;
   };
   workflow?: {
     workflow_batches_total?: number;
@@ -508,19 +582,32 @@ export interface ProjectExportPayload {
   quality_report: Record<string, unknown>;
   manifest?: Array<Record<string, unknown>>;
   coco?: {
-    images: Array<Record<string, unknown>>;
-    annotations: Array<Record<string, unknown>>;
-    categories: Array<Record<string, unknown>>;
+    train: {
+      images: Array<Record<string, unknown>>;
+      annotations: Array<Record<string, unknown>>;
+      categories: Array<Record<string, unknown>>;
+    };
+    val: {
+      images: Array<Record<string, unknown>>;
+      annotations: Array<Record<string, unknown>>;
+      categories: Array<Record<string, unknown>>;
+    };
   };
   yolo?: {
     labels: string[];
     data_yaml: Record<string, unknown>;
     records: Array<{
       frame_uri: string;
+      image_path: string;
       label_file: string;
+      split: string;
       lines: string[];
     }>;
   };
+  voc?: {
+    records: Array<Record<string, unknown>>;
+  };
+  csv?: Array<Record<string, unknown>>;
 }
 
 export interface ValidationQueueItem {

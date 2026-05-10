@@ -6,7 +6,7 @@ import io
 import secrets
 
 from bson import ObjectId
-from django.http import HttpRequest
+from django.http import HttpRequest, HttpResponse
 from mongoengine import Q
 from rest_framework import permissions, status
 from rest_framework.decorators import action
@@ -44,6 +44,13 @@ class JWTRequiredMixin:
 
 
 class ProjectViewSet(JWTRequiredMixin, ViewSet):
+    def _sync_cv_workflow(self, project: Project) -> None:
+        if project.project_type != Project.TYPE_CV:
+            return
+        from apps.cv_annotation.services.workflow import sync_project_workflow
+
+        sync_project_workflow(project)
+
     def get_queryset_for_user(self, user: User):
         if user.role in (User.ROLE_ADMIN,):
             return Project.objects.order_by("-created_at")
@@ -111,6 +118,7 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         serializer = ProjectSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         updated = serializer.update(project, serializer.validated_data)
+        self._sync_cv_workflow(updated)
         return Response(ProjectSerializer(updated, context={"request": request}).data, status=status.HTTP_200_OK)
 
     def partial_update(self, request, pk: str = None, *args, **kwargs) -> Response:
@@ -125,6 +133,7 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         serializer = ProjectSerializer(project, data=request.data, context={"request": request}, partial=True)
         serializer.is_valid(raise_exception=True)
         updated = serializer.update(project, serializer.validated_data)
+        self._sync_cv_workflow(updated)
         return Response(ProjectSerializer(updated, context={"request": request}).data, status=status.HTTP_200_OK)
 
     def destroy(self, request, pk: str = None, *args, **kwargs) -> Response:
@@ -140,6 +149,48 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
             return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
         project.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["get"], url_path="export")
+    def export(self, request, pk: str = None, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        if not ObjectId.is_valid(pk):
+            return Response({"detail": "Invalid project id"}, status=status.HTTP_400_BAD_REQUEST)
+        project = Project.objects(id=ObjectId(pk)).first()
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role != User.ROLE_ADMIN and str(project.owner.id) != str(user.id):
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        export_format = (request.query_params.get("format") or "both").strip().lower()
+        if export_format not in {"coco", "yolo", "voc", "csv", "both"}:
+            return Response({"detail": "Invalid export format. Use coco, yolo, voc, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.cv_annotation.models import SecurityEvent
+        from apps.cv_annotation.services.security import log_security_event
+        from apps.cv_annotation.services.workflow import build_dataset_export, build_dataset_export_archive
+
+        as_archive = (request.query_params.get("download") or "").strip().lower() in {"1", "true", "yes"}
+        if as_archive:
+            archive_name, archive_bytes = build_dataset_export_archive(project, export_format=export_format)
+            log_security_event(
+                project=project,
+                actor=user,
+                event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+                payload={"format": export_format, "archive": True, "filename": archive_name, "entrypoint": "projects"},
+            )
+            response = HttpResponse(archive_bytes, content_type="application/zip")
+            response["Content-Disposition"] = f'attachment; filename="{archive_name}"'
+            return response
+
+        payload = build_dataset_export(project, export_format=export_format)
+        log_security_event(
+            project=project,
+            actor=user,
+            event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+            payload={"format": export_format, "archive": False, "version": payload.get("export_version"), "entrypoint": "projects"},
+        )
+        return Response(payload, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="instructions/upload")
     def instructions_upload(self, request, pk: str = None, *args, **kwargs) -> Response:
@@ -255,6 +306,10 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
             membership.specialization = specialization or membership.specialization
             membership.is_active = True
             membership.save()
+            if membership_role == ProjectMembership.ROLE_ANNOTATOR and all(str(item.id) != str(participant.id) for item in (project.allowed_annotators or [])):
+                project.allowed_annotators = [*(project.allowed_annotators or []), participant]
+                project.save()
+        self._sync_cv_workflow(project)
         return Response({"created_users": created, "linked_memberships": linked, "skipped_rows": skipped}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="assignments/manual-distribute")

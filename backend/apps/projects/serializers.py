@@ -237,6 +237,16 @@ class ProjectSerializer(serializers.Serializer):
                 membership.save()
 
     def to_representation(self, instance: Project) -> Dict[str, Any]:
+        annotator_count = len(instance.allowed_annotators or [])
+        recommended_min = 5
+        minimum_full_cycle = 3
+        workflow_warnings = []
+        if annotator_count < int(instance.assignments_per_task or 1):
+            workflow_warnings.append("Not enough annotators for the configured assignments_per_task.")
+        if annotator_count < minimum_full_cycle:
+            workflow_warnings.append("Full independent annotation and validation requires at least 3 annotators.")
+        elif annotator_count < recommended_min:
+            workflow_warnings.append("Quality is limited with fewer than 5 annotators.")
         return {
             "id": str(instance.id),
             "owner_id": str(instance.owner.id),
@@ -258,6 +268,14 @@ class ProjectSerializer(serializers.Serializer):
             "assignments_per_task": instance.assignments_per_task,
             "agreement_threshold": instance.agreement_threshold,
             "iou_threshold": instance.iou_threshold,
+            "workflow_readiness": {
+                "annotators": annotator_count,
+                "minimum_full_cycle": minimum_full_cycle,
+                "recommended": recommended_min,
+                "can_run_full_cycle": annotator_count >= minimum_full_cycle,
+                "quality_mode": "draft" if annotator_count <= 1 else "limited" if annotator_count < minimum_full_cycle else "standard" if annotator_count < recommended_min else "recommended",
+                "warnings": workflow_warnings,
+            },
             "created_at": instance.created_at,
             "updated_at": instance.updated_at,
         }

@@ -17,6 +17,8 @@ import CreateProjectPage from "./pages/CreateProjectPage";
 import ProjectDetailPage from "./pages/ProjectDetailPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import ProjectWorkflowPage from "./pages/ProjectWorkflowPage";
+import VideoIntervalsPage from "./pages/VideoIntervalsPage";
+import BBoxValidationPage from "./pages/BBoxValidationPage";
 
 import AnnotationPage from "./pages/AnnotationPage";
 import AnnotatorProjectPage from "./pages/AnnotatorProjectPage";
@@ -76,6 +78,27 @@ export default function App() {
           </RequireAuth>
         }
       />
+      <Route
+        path="/labeling/intervals"
+        element={
+          <RequireAuth>
+            <Layout>
+              <VideoIntervalsPage />
+            </Layout>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/labeling/bbox-validation"
+        element={
+          <RequireAuth>
+            <Layout>
+              <BBoxValidationPage />
+            </Layout>
+          </RequireAuth>
+        }
+      />
+      <Route path="/projects/:projectId/intervals" element={<Navigate to="/labeling/intervals" replace />} />
       <Route
         path="/labeling/projects/:projectId"
         element={
@@ -186,4 +209,3 @@ export default function App() {
     </Routes>
   );
 }
-

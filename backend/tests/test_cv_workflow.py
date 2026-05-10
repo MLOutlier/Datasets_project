@@ -79,6 +79,9 @@ class TestUnifiedCvWorkflow:
         second_annotator = User(email="annotator2@example.com", username="annotator_two", role=User.ROLE_ANNOTATOR)
         second_annotator.set_password("password123")
         second_annotator.save()
+        third_annotator = User(email="annotator4@example.com", username="annotator_four", role=User.ROLE_ANNOTATOR)
+        third_annotator.set_password("password123")
+        third_annotator.save()
 
         project_resp = client.post(
             "/api/projects/",
@@ -88,7 +91,7 @@ class TestUnifiedCvWorkflow:
                 "annotation_type": "bbox",
                 "instructions": "Find drones",
                 "label_schema": [{"name": "drone"}],
-                "allowed_annotator_ids": [str(user_annotator.id), str(second_annotator.id)],
+                "allowed_annotator_ids": [str(user_annotator.id), str(second_annotator.id), str(third_annotator.id)],
                 "allowed_reviewer_ids": [str(user_reviewer.id)],
                 "assignments_per_task": 2,
                 "agreement_threshold": 0.9,
@@ -134,9 +137,60 @@ class TestUnifiedCvWorkflow:
         assert work_item.review_status == "requeued_low_agreement"
 
         assignments = list(Assignment.objects(work_item=work_item))
-        assert len(assignments) >= 2
+        assert len(assignments) == 3
         assert Assignment.objects(work_item=work_item, status=Assignment.STATUS_ASSIGNED).count() >= 1
-        assert WorkAnnotation.objects(work_item=work_item, status=WorkAnnotation.STATUS_REJECTED).count() == 2
+        assert WorkAnnotation.objects(work_item=work_item, status=WorkAnnotation.STATUS_SUBMITTED).count() == 2
+
+    def test_conflict_without_fresh_annotator_is_marked_insufficient(self, client, auth_headers, user_annotator, user_reviewer):
+        from apps.users.models import User
+
+        second_annotator = User(email="annotator-only-second@example.com", username="annotator_only_second", role=User.ROLE_ANNOTATOR)
+        second_annotator.set_password("password123")
+        second_annotator.save()
+
+        project_resp = client.post(
+            "/api/projects/",
+            {
+                "title": "Conflict with no spare annotator",
+                "project_type": "cv",
+                "annotation_type": "bbox",
+                "instructions": "Find drones",
+                "label_schema": [{"name": "drone"}],
+                "allowed_annotator_ids": [str(user_annotator.id), str(second_annotator.id)],
+                "allowed_reviewer_ids": [str(user_reviewer.id)],
+                "assignments_per_task": 2,
+                "agreement_threshold": 0.9,
+                "iou_threshold": 0.5,
+            },
+            **auth_headers,
+            format="json",
+        )
+        project_id = project_resp.data["id"]
+
+        upload = make_test_image("conflict-no-spare.png")
+        upload_resp = client.post(f"/api/projects/{project_id}/imports/", {"file": upload}, **auth_headers)
+        client.post(f"/api/projects/{project_id}/imports/{upload_resp.data['import_id']}/finalize/", {}, **auth_headers, format="json")
+
+        project = Project.objects.get(id=project_id)
+        assignments = list(Assignment.objects(project=project).order_by("order_index"))
+
+        client.post(
+            f"/api/annotator/assignments/{assignments[0].id}/submit/",
+            {"label_data": {"boxes": [{"x": 10, "y": 10, "width": 20, "height": 20, "label": "drone"}]}, "is_final": True},
+            HTTP_AUTHORIZATION=f"Bearer {create_access_token(user_annotator)}",
+            format="json",
+        )
+        submit_two = client.post(
+            f"/api/annotator/assignments/{assignments[1].id}/submit/",
+            {"label_data": {"boxes": [{"x": 70, "y": 50, "width": 18, "height": 18, "label": "drone"}]}, "is_final": True},
+            HTTP_AUTHORIZATION=f"Bearer {create_access_token(second_annotator)}",
+            format="json",
+        )
+
+        assert submit_two.status_code == 200
+        assert submit_two.data["evaluation"]["state"] == "insufficient_annotators"
+        work_item = WorkItem.objects.get(project=project)
+        assert work_item.validation_status == WorkItem.VALIDATION_INSUFFICIENT_ANNOTATORS
 
     def test_finalize_only_assigns_allowed_annotators(self, client, auth_headers, user_annotator):
         from apps.users.models import User
@@ -201,8 +255,20 @@ class TestUnifiedCvWorkflow:
 
         projects_resp = client.get("/api/annotator/projects/", **auth_headers_annotator)
         assert projects_resp.status_code == 200
-        assert len(projects_resp.data["available_projects"]) == 1
-        assert projects_resp.data["available_projects"][0]["project_id"] == project_id
+        all_stage_cards = [
+            *projects_resp.data["available_projects"],
+            *projects_resp.data["active_projects"],
+            *projects_resp.data["completed_projects"],
+        ]
+        assert len(all_stage_cards) == 4
+        assert {item["stage"] for item in all_stage_cards} == {
+            "interval_annotation",
+            "interval_validation",
+            "bbox_annotation",
+            "bbox_validation",
+        }
+        assert all(item["project_id"] == project_id for item in all_stage_cards)
+        assert any(item["stage"] == "bbox_annotation" and item["route"].startswith("/labeling/projects/") for item in all_stage_cards)
 
         detail_resp = client.get(f"/api/annotator/projects/{project_id}/", **auth_headers_annotator)
         assert detail_resp.status_code == 200

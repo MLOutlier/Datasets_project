@@ -84,7 +84,7 @@ export function QualityPage() {
       <div className="card">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Очередь валидации</h1>
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-          Здесь собраны пакеты кадров, которые прошли разметку и ждут приемки или отправки на доработку.
+          Здесь заказчик отслеживает качество и спорные пакеты. Рабочая bbox-валидация исполнителей выполняется в разделе разметки.
         </p>
         {queueQuery.isLoading ? (
           <div className="mt-6 flex justify-center">
@@ -156,7 +156,21 @@ export function QualityPage() {
                     </div>
 
                     <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[220px,1fr]">
-                      <img src={item.frame_url} alt={`Кадр ${item.frame_number}`} className="h-40 w-full rounded-lg border border-gray-200 object-contain dark:border-gray-800" />
+                      <div className="relative h-40 w-full overflow-hidden rounded-lg border border-gray-200 bg-black dark:border-gray-800">
+                        <img src={item.frame_url} alt={`Кадр ${item.frame_number}`} className="h-full w-full object-contain" />
+                        {(item.final_annotation?.boxes ?? []).map((box, boxIndex) => (
+                          <div
+                            key={`${item.work_item_id}-${boxIndex}`}
+                            className="absolute border-2 border-emerald-400"
+                            style={{
+                              left: `${(box.x / Math.max(item.width, 1)) * 100}%`,
+                              top: `${(box.y / Math.max(item.height, 1)) * 100}%`,
+                              width: `${(box.width / Math.max(item.width, 1)) * 100}%`,
+                              height: `${(box.height / Math.max(item.height, 1)) * 100}%`,
+                            }}
+                          />
+                        ))}
+                      </div>
                       <div className="space-y-3">
                         <div className="rounded-lg border border-gray-200 bg-white p-3 text-xs dark:border-gray-800 dark:bg-gray-900">
                           <div className="font-medium text-gray-900 dark:text-white">Результат разметки</div>

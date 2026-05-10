@@ -51,6 +51,7 @@ function normalizeParticipantRules(rules?: ProjectParticipantRules): Required<Pr
     specialization: String(rules?.specialization ?? ""),
     group: String(rules?.group ?? ""),
     assignment_scope: (rules?.assignment_scope as Required<ProjectParticipantRules>["assignment_scope"]) ?? "selected_only",
+    stage_pools: rules?.stage_pools ?? {},
     ai_prelabel_enabled: Boolean(rules?.ai_prelabel_enabled ?? true),
     ai_model: String(rules?.ai_model ?? "baseline-box-v1"),
     ai_confidence_threshold: Number(rules?.ai_confidence_threshold ?? 0.7),
@@ -58,6 +59,16 @@ function normalizeParticipantRules(rules?: ProjectParticipantRules): Required<Pr
     tracking_algorithm: String(rules?.tracking_algorithm ?? "CSRT"),
     task_batch_size: Number(rules?.task_batch_size ?? 10),
     min_sequence_size: Number(rules?.min_sequence_size ?? 3),
+    interval_annotators_per_chunk: Number(rules?.interval_annotators_per_chunk ?? 1),
+    interval_validators_per_item: Number(rules?.interval_validators_per_item ?? 3),
+    bbox_validators_per_batch: Number(rules?.bbox_validators_per_batch ?? 3),
+    bbox_real_items_per_batch: Number(rules?.bbox_real_items_per_batch ?? 20),
+    bbox_golden_items_per_batch: Number(rules?.bbox_golden_items_per_batch ?? 10),
+    golden_min_score: Number(rules?.golden_min_score ?? 0.8),
+    golden_candidate_threshold: Number(rules?.golden_candidate_threshold ?? 0.9),
+    golden_promotion_target: Number(rules?.golden_promotion_target ?? 10),
+    interval_review_padding_sec: Number(rules?.interval_review_padding_sec ?? 3),
+    stuck_assignment_ttl_minutes: Number(rules?.stuck_assignment_ttl_minutes ?? 30),
   };
 }
 
@@ -180,7 +191,7 @@ export default function ProjectWorkflowPage() {
     setSelectedAnnotators(project.allowed_annotator_ids ?? []);
   }, [projectQuery.data]);
 
-  const hasWorkItems = useMemo(() => (overviewQuery.data?.work_items?.total ?? 0) > 0, [overviewQuery.data]);
+  const hasWorkItems = useMemo(() => Number(overviewQuery.data?.work_items?.total ?? 0) > 0, [overviewQuery.data]);
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -200,6 +211,7 @@ export default function ProjectWorkflowPage() {
           specialization,
           group: groupRule,
           assignment_scope: assignmentScope,
+          stage_pools: {},
           ai_prelabel_enabled: aiEnabled,
           ai_model: aiModel.trim() || "baseline-box-v1",
           ai_confidence_threshold: Number(aiConfidenceThreshold) || 0.7,
@@ -207,6 +219,10 @@ export default function ProjectWorkflowPage() {
           tracking_algorithm: trackingAlgorithm,
           task_batch_size: Number(taskBatchSize) || 10,
           min_sequence_size: Number(minSequenceSize) || 3,
+          golden_candidate_threshold: 0.9,
+          golden_promotion_target: 10,
+          interval_review_padding_sec: 3,
+          stuck_assignment_ttl_minutes: 30,
         },
         label_schema: labels,
         allowed_annotator_ids: selectedAnnotators,
@@ -233,6 +249,8 @@ export default function ProjectWorkflowPage() {
         `CSV import complete: created ${result.created_users}, linked ${result.linked_memberships}, skipped ${result.skipped_rows}.`
       );
       await queryClient.invalidateQueries({ queryKey: ["participants", "annotator"] });
+      await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
     },
     onError: (err: any) => {
       setError(err?.response?.data?.detail || err?.message || "CSV import failed");

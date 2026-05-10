@@ -5,7 +5,7 @@ from rest_framework import serializers
 
 from apps.projects.models import Project
 from apps.users.models import User
-from .models import Assignment, ImportSession, ReviewRecord
+from .models import Assignment, ImportSession, ReviewRecord, VideoInterval
 
 
 class ImportFinalizeSerializer(serializers.Serializer):
@@ -57,6 +57,12 @@ class AssignmentSubmitSerializer(serializers.Serializer):
                     raise serializers.ValidationError(f"label_data.boxes[{index}] must be inside frame bounds")
                 if x + width > frame.width or y + height > frame.height:
                     raise serializers.ValidationError(f"label_data.boxes[{index}] exceeds frame bounds")
+                frame_area = max(float(frame.width or 0) * float(frame.height or 0), 1.0)
+                box_area = width * height
+                if box_area < 4.0:
+                    raise serializers.ValidationError(f"label_data.boxes[{index}] is too small to be useful")
+                if box_area / frame_area > 0.98:
+                    raise serializers.ValidationError(f"label_data.boxes[{index}] covers almost the entire frame")
             if allowed_labels and label not in allowed_labels:
                 raise serializers.ValidationError(f"label_data.boxes[{index}] uses unknown label '{label}'")
         return value
@@ -120,6 +126,72 @@ class ValidationBatchResolveSerializer(serializers.Serializer):
                 raise serializers.ValidationError(f"items[{index}].decision must be 'approve' or 'needs_changes'")
             normalized.append({"work_item_id": work_item_id, "decision": decision, "comment": comment})
         return normalized
+
+
+class VideoIntervalUpsertSerializer(serializers.Serializer):
+    id = serializers.CharField(required=False)
+    start_frame = serializers.IntegerField(min_value=0)
+    end_frame = serializers.IntegerField(min_value=0)
+    source = serializers.ChoiceField(choices=[VideoInterval.SOURCE_AUTO, VideoInterval.SOURCE_MANUAL], required=False, default=VideoInterval.SOURCE_MANUAL)
+    confidence = serializers.FloatField(required=False, min_value=0.0, max_value=1.0, default=0.0)
+    metadata = serializers.DictField(required=False, default=dict)
+
+    def validate(self, attrs):
+        if attrs["end_frame"] < attrs["start_frame"]:
+            raise serializers.ValidationError("end_frame must be greater than or equal to start_frame")
+        interval_id = attrs.get("id")
+        if interval_id and not ObjectId.is_valid(interval_id):
+            raise serializers.ValidationError({"id": "Invalid interval id"})
+        return attrs
+
+
+class VideoIntervalValidationSerializer(serializers.Serializer):
+    interval_ids = serializers.ListField(child=serializers.CharField(), allow_empty=False)
+    decision = serializers.ChoiceField(choices=[VideoInterval.STATUS_APPROVED, VideoInterval.STATUS_REJECTED])
+    comment = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_interval_ids(self, value):
+        normalized = []
+        for interval_id in value:
+            if not ObjectId.is_valid(interval_id):
+                raise serializers.ValidationError(f"Invalid interval id: {interval_id}")
+            normalized.append(interval_id)
+        return normalized
+
+
+class VideoChunkSubmitSerializer(serializers.Serializer):
+    intervals = serializers.ListField(child=serializers.DictField(), allow_empty=True)
+    comment = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_intervals(self, value):
+        normalized = []
+        for index, item in enumerate(value):
+            try:
+                start_frame = int(item.get("start_frame"))
+                end_frame = int(item.get("end_frame"))
+            except Exception:
+                raise serializers.ValidationError(f"intervals[{index}] must have numeric start_frame/end_frame")
+            if start_frame < 0 or end_frame < 0 or end_frame < start_frame:
+                raise serializers.ValidationError(f"intervals[{index}] has invalid frame boundaries")
+            normalized.append(
+                {
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "confidence": float(item.get("confidence") or 0.0),
+                    "label": str(item.get("label") or "object"),
+                }
+            )
+        return normalized
+
+
+class IntervalValidationDecisionSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=[VideoInterval.STATUS_APPROVED, VideoInterval.STATUS_REJECTED])
+    comment = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class BBoxValidationSubmitSerializer(serializers.Serializer):
+    decisions = serializers.DictField(child=serializers.CharField(), default=dict)
+    golden_decisions = serializers.DictField(child=serializers.CharField(), default=dict)
 
 
 class ParticipantSerializer(serializers.Serializer):

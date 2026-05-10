@@ -60,7 +60,7 @@ export function Leaderboard({ projectId }: { projectId: string }) {
 
       {/* Таблица лидеров */}
       <div className="overflow-hidden rounded-xl border border-gray-200 dark:border-gray-700">
-        {data.leaderboard.map((entry) => (
+        {data.leaderboard.map((entry: LeaderboardEntry) => (
           <LeaderboardRow
             key={entry.user_id}
             entry={entry}

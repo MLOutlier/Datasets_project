@@ -12,6 +12,21 @@ export default function AnnotatorProjectPage() {
     queryFn: () => annotatorAPI.projectDetail(projectId!),
     enabled: !!projectId,
   });
+  const intervalChunkQuery = useQuery({
+    queryKey: ["interval-chunk-queue", projectId],
+    queryFn: () => annotatorAPI.intervalChunkQueue(),
+    enabled: !!projectId,
+  });
+  const intervalValidationQuery = useQuery({
+    queryKey: ["interval-validation-queue", projectId],
+    queryFn: () => annotatorAPI.intervalValidationQueue(),
+    enabled: !!projectId,
+  });
+  const bboxValidationQuery = useQuery({
+    queryKey: ["bbox-validation-queue", projectId],
+    queryFn: () => annotatorAPI.bboxValidationQueue(),
+    enabled: !!projectId,
+  });
 
   const nextAssignmentMutation = useMutation({
     mutationFn: () => annotatorAPI.nextProjectAssignment(projectId!),
@@ -37,6 +52,9 @@ export default function AnnotatorProjectPage() {
 
   const project = projectQuery.data;
   const primaryActionLabel = project.active_assignment_id ? "Продолжить разметку" : project.next_assignment_id ? "Начать разметку" : "Нет доступных заданий";
+  const intervalChunkCount = (intervalChunkQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
+  const intervalValidationCount = (intervalValidationQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
+  const bboxValidationCount = (bboxValidationQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
 
   return (
     <div className="space-y-6">
@@ -86,6 +104,45 @@ export default function AnnotatorProjectPage() {
         <div className="card">
           <div className="text-sm text-gray-500 dark:text-gray-400">Завершено</div>
           <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.completed_count}</div>
+        </div>
+      </div>
+
+      <div className="card space-y-4">
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Этапы проекта</h2>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+            Рабочие этапы привязаны к этому проекту. Если на этапе нет задач, дождитесь завершения предыдущего этапа или появления новых assignment.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
+          <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=intervals`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300 dark:border-gray-800 dark:hover:border-blue-700">
+            <div className="text-sm text-gray-500 dark:text-gray-400">Этап 1</div>
+            <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Интервалы видео</div>
+            <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{intervalChunkCount}</div>
+          </Link>
+          <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=interval-validation`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300 dark:border-gray-800 dark:hover:border-blue-700">
+            <div className="text-sm text-gray-500 dark:text-gray-400">Этап 2</div>
+            <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Валидация интервалов</div>
+            <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{intervalValidationCount}</div>
+          </Link>
+          <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-800">
+            <div className="text-sm text-gray-500 dark:text-gray-400">Этап 3</div>
+            <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">BBox-разметка</div>
+            <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.available_count + project.stats.active_count}</div>
+            <button
+              type="button"
+              className="btn-primary mt-4 w-full"
+              onClick={() => nextAssignmentMutation.mutate()}
+              disabled={nextAssignmentMutation.isPending || (!project.active_assignment_id && !project.next_assignment_id)}
+            >
+              {nextAssignmentMutation.isPending ? "Открываем..." : primaryActionLabel}
+            </button>
+          </div>
+          <Link to={`/labeling/bbox-validation?projectId=${project.project_id}`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300 dark:border-gray-800 dark:hover:border-blue-700">
+            <div className="text-sm text-gray-500 dark:text-gray-400">Этап 4</div>
+            <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">BBox-валидация</div>
+            <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{bboxValidationCount}</div>
+          </Link>
         </div>
       </div>
 
