@@ -27,8 +27,8 @@ class AssignmentSubmitSerializer(serializers.Serializer):
         if not isinstance(boxes, list):
             raise serializers.ValidationError("label_data.boxes must be a list")
         assignment = self.context.get("assignment")
-        frame = assignment.work_item.frame if assignment else None
-        label_schema = assignment.project.label_schema if assignment else []
+        frame = assignment.work_item.frame if assignment else self.context.get("frame")
+        label_schema = assignment.project.label_schema if assignment else self.context.get("label_schema", [])
         allowed_labels = {
             str(item.get("name") or item.get("label") or "").strip()
             for item in (label_schema or [])

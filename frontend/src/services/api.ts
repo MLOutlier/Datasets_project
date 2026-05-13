@@ -23,13 +23,16 @@ import {
   ProjectImportResponse,
   ProjectOverview,
   QualityMetricsItem,
+  QualityReviewResponse,
   LeaderboardResponse,
   LeaderboardEntry,
   QualityReviewRequest,
   QueueItem,
   RegisterRequest,
+  RatingHistoryItem,
   SecurityEventItem,
   Task,
+  TaskRegistryResponse,
   Transaction,
   TransferRequest,
   User,
@@ -196,6 +199,10 @@ export const projectsAPI = {
     const res = await api.get<ApiListResponse<Project>>("/api/projects/", { params });
     return res.data;
   },
+  async taskRegistry(): Promise<TaskRegistryResponse> {
+    const res = await api.get<TaskRegistryResponse>("/api/projects/task-registry/");
+    return res.data;
+  },
   async get(id: string): Promise<Project> {
     const res = await api.get<Project>(`/api/projects/${id}/`);
     return res.data;
@@ -230,6 +237,24 @@ export const projectsAPI = {
     });
     return res.data;
   },
+  async nextTask(projectId: string): Promise<Task> {
+    const res = await api.get<Task>(`/api/projects/${projectId}/tasks/next/`);
+    return res.data;
+  },
+  async genericTasks(projectId: string): Promise<{ summary: Record<string, number>; items: Task[] }> {
+    const res = await api.get<{ summary: Record<string, number>; items: Task[] }>(`/api/projects/${projectId}/generic-tasks/`);
+    return res.data;
+  },
+  async createGenericTasks(projectId: string, body: FormData | { items: unknown[] | string }): Promise<{ summary: Record<string, number>; created: number; skipped: number; total: number; dataset_id: string }> {
+    if (body instanceof FormData) {
+      const res = await api.post<{ summary: Record<string, number>; created: number; skipped: number; total: number; dataset_id: string }>(`/api/projects/${projectId}/generic-tasks/`, body, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      return res.data;
+    }
+    const res = await api.post<{ summary: Record<string, number>; created: number; skipped: number; total: number; dataset_id: string }>(`/api/projects/${projectId}/generic-tasks/`, body);
+    return res.data;
+  },
 };
 
 export const workflowAPI = {
@@ -257,11 +282,11 @@ export const workflowAPI = {
     const res = await api.post<ProjectOverview>(`/api/projects/${projectId}/workflow/sync/`, {});
     return res.data;
   },
-  async export(projectId: string, format: "coco" | "yolo" | "voc" | "csv" | "both" = "both"): Promise<ProjectExportPayload> {
+  async export(projectId: string, format: "coco" | "yolo" | "voc" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<ProjectExportPayload> {
     const res = await api.get<ProjectExportPayload>(`/api/cv/projects/${projectId}/export/`, { params: { format } });
     return res.data;
   },
-  async exportArchive(projectId: string, format: "coco" | "yolo" | "voc" | "csv" | "both" = "both"): Promise<Blob> {
+  async exportArchive(projectId: string, format: "coco" | "yolo" | "voc" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<Blob> {
     const res = await api.get(`/api/cv/projects/${projectId}/export/`, {
       params: { format, download: "1" },
       responseType: "blob",
@@ -278,6 +303,12 @@ export const workflowAPI = {
   },
   async promoteGoldenCandidate(projectId: string, goldenFrameId: string, reviewNotes?: string): Promise<any> {
     const res = await api.post(`/api/projects/${projectId}/golden-candidates/${goldenFrameId}/promote/`, {
+      review_notes: reviewNotes || "",
+    });
+    return res.data;
+  },
+  async retireGoldenCandidate(projectId: string, goldenFrameId: string, reviewNotes?: string): Promise<any> {
+    const res = await api.post(`/api/projects/${projectId}/golden-candidates/${goldenFrameId}/retire/`, {
       review_notes: reviewNotes || "",
     });
     return res.data;

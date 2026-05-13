@@ -41,6 +41,7 @@ export interface Task {
   difficulty_score: number;
   deadline_at?: string | null;
   input_ref?: string | null;
+  metadata?: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;
 }
@@ -168,6 +169,54 @@ export interface TaskUpdateRequest extends Partial<TaskCreateRequest> {
 export type ProjectStatus = "open" | "active" | "closed";
 export type ProjectType = "standard" | "cv";
 export type AnnotationType = "generic" | "bbox";
+export type ProjectTaskType =
+  | "video_annotation"
+  | "video_interval_validation"
+  | "bbox_annotation"
+  | "bbox_validation"
+  | "text_annotation"
+  | "image_annotation"
+  | "classification"
+  | "comparison";
+export type ProjectWidgetType =
+  | "video_intervals"
+  | "interval_validation"
+  | "bbox"
+  | "bbox_validation"
+  | "text"
+  | "image_labels"
+  | "classification"
+  | "comparison";
+
+export interface TaskTypeSpec {
+  value: ProjectTaskType;
+  title: string;
+  description: string;
+  default_widget: ProjectWidgetType;
+  widgets: ProjectWidgetType[];
+  annotation_type: AnnotationType;
+  requires_source_project: boolean;
+  uses_cv_workflow: boolean;
+  input_modes: string[];
+  export_formats: string[];
+  executor_route: string;
+  ui_hints: Record<string, unknown>;
+  widget_config?: {
+    widget_type: ProjectWidgetType;
+    input_schema: Record<string, unknown>;
+    output_schema: Record<string, unknown>;
+    validation_rules: Record<string, unknown>;
+    ui_hints: Record<string, unknown>;
+  };
+}
+
+export interface TaskRegistryResponse {
+  version: number;
+  default_task_type: ProjectTaskType;
+  default_widget_type: ProjectWidgetType;
+  task_types: TaskTypeSpec[];
+  widgets: Array<{ value: ProjectWidgetType; title: string }>;
+}
 
 export interface ProjectLabel {
   name: string;
@@ -201,6 +250,7 @@ export interface ProjectParticipantRules {
   golden_min_score?: number;
   golden_candidate_threshold?: number;
   golden_promotion_target?: number;
+  annotation_golden_interval?: number;
   interval_review_padding_sec?: number;
   stuck_assignment_ttl_minutes?: number;
 }
@@ -229,16 +279,28 @@ export interface GoldenCandidate {
   height: number;
   candidate_score: number;
   candidate_source: string;
+  status?: "candidate" | "active" | "retired" | string;
   is_active: boolean;
   is_candidate: boolean;
   promoted_at?: string | null;
   review_notes?: string;
   reference_annotation: Record<string, unknown>;
+  stats?: {
+    annotation_seen: number;
+    annotation_passed: number;
+    annotation_failed: number;
+    annotation_pass_rate: number;
+    validation_seen: number;
+    validation_passed: number;
+    validation_failed: number;
+    validation_pass_rate: number;
+  };
 }
 
 export interface GoldenCandidatesResponse extends ApiListResponse<GoldenCandidate> {
   active_count: number;
   candidate_count: number;
+  retired_count?: number;
 }
 
 export interface Project {
@@ -249,6 +311,11 @@ export interface Project {
   status: ProjectStatus;
   project_type: ProjectType;
   annotation_type: AnnotationType;
+  task_type: ProjectTaskType;
+  widget_type: ProjectWidgetType;
+  source_project_id?: string | null;
+  source_project_title?: string;
+  source_config?: Record<string, unknown>;
   instructions: string;
   instructions_file_uri?: string;
   instructions_file_name?: string;
@@ -272,6 +339,10 @@ export interface CreateProjectRequest {
   status?: ProjectStatus;
   project_type?: ProjectType;
   annotation_type?: AnnotationType;
+  task_type?: ProjectTaskType;
+  widget_type?: ProjectWidgetType;
+  source_project_id?: string | null;
+  source_config?: Record<string, unknown>;
   instructions?: string;
   label_schema?: ProjectLabel[];
   participant_rules?: ProjectParticipantRules;
@@ -323,8 +394,23 @@ export interface ProjectOverview {
     status: string;
     project_type: string;
     annotation_type: string;
+    task_type?: string;
+    widget_type?: string;
+    source_project_id?: string | null;
+    source_project_title?: string;
   };
   imports: Record<string, unknown>;
+  source_sync?: {
+    required: boolean;
+    status: "not_required" | "not_synced" | "synced" | "failed" | string;
+    created: number;
+    skipped: number;
+    errors: string[];
+    details: Record<string, unknown>;
+    synced_at?: string;
+    source_project_id?: string | null;
+    source_project_title?: string;
+  };
   work_items: Record<string, unknown>;
   assignments: Record<string, unknown>;
   reviews: Record<string, unknown>;
@@ -375,6 +461,8 @@ export interface AnnotatorProjectSummary {
   project_id: string;
   project_title: string;
   stage?: "interval_annotation" | "interval_validation" | "bbox_annotation" | "bbox_validation" | string;
+  task_type?: ProjectTaskType | string;
+  widget_type?: ProjectWidgetType | string;
   stage_title?: string;
   linked_project_title?: string;
   route?: string;
@@ -408,6 +496,10 @@ export interface AnnotatorProjectDetail {
   project_id: string;
   project_title: string;
   project_status: string;
+  task_type?: ProjectTaskType | string;
+  widget_type?: ProjectWidgetType | string;
+  source_project_id?: string | null;
+  source_project_title?: string;
   description: string;
   instructions: string;
   instructions_file_uri?: string;
@@ -530,7 +622,7 @@ export interface AssignmentSubmitResponse {
   assignment_status: string;
   annotation_status: string;
   evaluation?: {
-    state: "accepted" | "requeued";
+    state: "accepted" | "requeued" | "golden_checked" | string;
     metrics: Record<string, unknown>;
     review_id?: string;
     requeued_assignments?: number;
@@ -578,6 +670,8 @@ export interface ProjectExportPayload {
     id: string;
     title: string;
     annotation_type: string;
+    task_type?: string;
+    widget_type?: string;
   };
   quality_report: Record<string, unknown>;
   manifest?: Array<Record<string, unknown>>;
@@ -607,6 +701,8 @@ export interface ProjectExportPayload {
   voc?: {
     records: Array<Record<string, unknown>>;
   };
+  json?: Array<Record<string, unknown>>;
+  jsonl?: string;
   csv?: Array<Record<string, unknown>>;
 }
 

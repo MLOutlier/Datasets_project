@@ -7,12 +7,28 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.projects.models import Project, ProjectMembership
+from apps.projects.models import Project, ProjectMembership, Task
+from apps.projects.services.generic_tasks import (
+    build_generic_project_export,
+    build_generic_project_export_archive,
+    is_generic_task_project,
+)
+from apps.projects.task_registry import (
+    TASK_BBOX_ANNOTATION,
+    TASK_BBOX_VALIDATION,
+    TASK_CLASSIFICATION,
+    TASK_COMPARISON,
+    TASK_IMAGE_ANNOTATION,
+    TASK_TEXT_ANNOTATION,
+    TASK_VIDEO_ANNOTATION,
+    TASK_VIDEO_INTERVAL_VALIDATION,
+)
 from apps.users.models import User
 from apps.users.views import authenticate_from_jwt
 from .models import (
     Assignment,
     BBoxValidationAssignment,
+    GoldenAnnotationAssignment,
     ImportAsset,
     ImportSession,
     IntervalValidationAssignment,
@@ -48,11 +64,17 @@ from .services.workflow import (
     generate_auto_intervals_for_asset,
     list_video_intervals,
     list_golden_candidates,
+    golden_annotation_assignment_payload,
+    golden_assignment_public_id,
+    maybe_create_hidden_golden_assignment,
     annotator_interval_chunk_queue,
+    parse_golden_assignment_public_id,
     process_import_asset,
     project_overview,
     promote_golden_candidate,
+    retire_golden_frame,
     resolve_review,
+    submit_golden_annotation_assignment,
     submit_bbox_validation_assignment,
     submit_interval_chunk_assignment,
     submit_interval_validation,
@@ -122,10 +144,33 @@ def project_export_endpoint(request: HttpRequest, project_id: str):
         return JsonResponse({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
 
     export_format = (request.GET.get("format") or "both").strip().lower()
-    if export_format not in {"coco", "yolo", "voc", "csv", "both"}:
-        return JsonResponse({"detail": "Invalid export format. Use coco, yolo, voc, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
+    if export_format not in {"coco", "yolo", "voc", "csv", "json", "jsonl", "both"}:
+        return JsonResponse({"detail": "Invalid export format. Use coco, yolo, voc, csv, json, jsonl or both"}, status=status.HTTP_400_BAD_REQUEST)
 
     as_archive = (request.GET.get("download") or "").strip().lower() in {"1", "true", "yes"}
+    if is_generic_task_project(project):
+        if export_format not in {"json", "jsonl", "csv", "both"}:
+            return JsonResponse({"detail": "Invalid generic export format. Use json, jsonl, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
+        if as_archive:
+            archive_name, archive_bytes = build_generic_project_export_archive(project, export_format=export_format)
+            log_security_event(
+                project=project,
+                actor=user,
+                event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+                payload={"format": export_format, "archive": True, "filename": archive_name, "entrypoint": "function", "generic": True},
+            )
+            response = HttpResponse(archive_bytes, content_type="application/zip")
+            response["Content-Disposition"] = f'attachment; filename="{archive_name}"'
+            return response
+        payload = build_generic_project_export(project, export_format=export_format)
+        log_security_event(
+            project=project,
+            actor=user,
+            event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+            payload={"format": export_format, "archive": False, "version": payload.get("export_version"), "entrypoint": "function", "generic": True},
+        )
+        return JsonResponse(payload, status=status.HTTP_200_OK, json_dumps_params={"ensure_ascii": False})
+
     if as_archive:
         archive_name, archive_bytes = build_dataset_export_archive(project, export_format=export_format)
         log_security_event(
@@ -222,7 +267,15 @@ class ProjectImportFinalizeView(AuthenticatedAPIView):
         import_session = ImportSession.objects(id=ObjectId(import_id), project=project).first()
         if not import_session:
             return Response({"detail": "Import session not found"}, status=status.HTTP_404_NOT_FOUND)
-        summary = create_work_items_for_import(import_session)
+        if getattr(project, "task_type", "") == TASK_IMAGE_ANNOTATION:
+            from apps.projects.services.generic_tasks import create_image_tasks_from_import
+
+            summary = create_image_tasks_from_import(import_session)
+            import_session.summary = summary
+            import_session.status = ImportSession.STATUS_FINALIZED
+            import_session.save()
+        else:
+            summary = create_work_items_for_import(import_session)
         return Response(
             {
                 "import_id": str(import_session.id),
@@ -512,9 +565,31 @@ class ProjectExportView(AuthenticatedAPIView):
         if not project:
             return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
         export_format = (request.query_params.get("format") or "both").strip().lower()
-        if export_format not in {"coco", "yolo", "voc", "csv", "both"}:
-            return Response({"detail": "Invalid export format. Use coco, yolo, voc, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
+        if export_format not in {"coco", "yolo", "voc", "csv", "json", "jsonl", "both"}:
+            return Response({"detail": "Invalid export format. Use coco, yolo, voc, csv, json, jsonl or both"}, status=status.HTTP_400_BAD_REQUEST)
         as_archive = (request.query_params.get("download") or "").strip().lower() in {"1", "true", "yes"}
+        if is_generic_task_project(project):
+            if export_format not in {"json", "jsonl", "csv", "both"}:
+                return Response({"detail": "Invalid generic export format. Use json, jsonl, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
+            if as_archive:
+                archive_name, archive_bytes = build_generic_project_export_archive(project, export_format=export_format)
+                log_security_event(
+                    project=project,
+                    actor=user,
+                    event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+                    payload={"format": export_format, "archive": True, "filename": archive_name, "generic": True},
+                )
+                response = HttpResponse(archive_bytes, content_type="application/zip")
+                response["Content-Disposition"] = f'attachment; filename="{archive_name}"'
+                return response
+            payload = build_generic_project_export(project, export_format=export_format)
+            log_security_event(
+                project=project,
+                actor=user,
+                event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+                payload={"format": export_format, "archive": False, "version": payload.get("export_version"), "generic": True},
+            )
+            return Response(payload, status=status.HTTP_200_OK)
         if as_archive:
             archive_name, archive_bytes = build_dataset_export_archive(project, export_format=export_format)
             log_security_event(
@@ -548,8 +623,9 @@ class ProjectGoldenCandidatesView(AuthenticatedAPIView):
         candidates = list_golden_candidates(project)
         payload = {
             "items": candidates,
-            "active_count": sum(1 for item in candidates if item["is_active"]),
-            "candidate_count": len(candidates),
+            "active_count": sum(1 for item in candidates if item.get("status") == "active"),
+            "candidate_count": sum(1 for item in candidates if item.get("status") == "candidate"),
+            "retired_count": sum(1 for item in candidates if item.get("status") == "retired"),
         }
         return Response(payload, status=status.HTTP_200_OK)
 
@@ -566,6 +642,23 @@ class ProjectGoldenCandidatePromoteView(AuthenticatedAPIView):
         review_notes = str(request.data.get("review_notes") or "").strip()
         try:
             result = promote_golden_candidate(project, golden_frame_id, actor=user, review_notes=review_notes)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class ProjectGoldenRetireView(AuthenticatedAPIView):
+    def post(self, request, project_id: str, golden_frame_id: str):
+        try:
+            user = self.get_user(request)
+        except PermissionError:
+            return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        project = self.get_project_for_user(user, project_id, require_owner=True)
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        review_notes = str(request.data.get("review_notes") or "").strip()
+        try:
+            result = retire_golden_frame(project, golden_frame_id, actor=user, review_notes=review_notes)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
@@ -613,21 +706,37 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         stage_specs = {
-            "interval_annotation": {
+            TASK_VIDEO_ANNOTATION: {
                 "title": "Разметка интервалов",
                 "route": lambda project_id: f"/labeling/intervals?projectId={project_id}&stage=intervals",
             },
-            "interval_validation": {
+            TASK_VIDEO_INTERVAL_VALIDATION: {
                 "title": "Валидация интервалов",
                 "route": lambda project_id: f"/labeling/intervals?projectId={project_id}&stage=interval-validation",
             },
-            "bbox_annotation": {
+            TASK_BBOX_ANNOTATION: {
                 "title": "Разметка объектов",
                 "route": lambda project_id: f"/labeling/projects/{project_id}",
             },
-            "bbox_validation": {
+            TASK_BBOX_VALIDATION: {
                 "title": "Валидация объектов",
                 "route": lambda project_id: f"/labeling/bbox-validation?projectId={project_id}",
+            },
+            TASK_TEXT_ANNOTATION: {
+                "title": "Текстовая разметка",
+                "route": lambda project_id: f"/labeling/generic/{project_id}",
+            },
+            TASK_IMAGE_ANNOTATION: {
+                "title": "Разметка изображений",
+                "route": lambda project_id: f"/labeling/generic/{project_id}",
+            },
+            TASK_CLASSIFICATION: {
+                "title": "Классификация",
+                "route": lambda project_id: f"/labeling/generic/{project_id}",
+            },
+            TASK_COMPARISON: {
+                "title": "Сравнение",
+                "route": lambda project_id: f"/labeling/generic/{project_id}",
             },
         }
 
@@ -646,6 +755,8 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
                 "project_id": project_id,
                 "project_title": spec["title"],
                 "stage": stage,
+                "task_type": getattr(project, "task_type", "bbox_annotation") or "bbox_annotation",
+                "widget_type": getattr(project, "widget_type", "bbox") or "bbox",
                 "stage_title": spec["title"],
                 "linked_project_title": project.title,
                 "route": spec["route"](project_id),
@@ -678,10 +789,9 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             project = remember_project(project)
             project_id = str(project.id)
             if project_id not in grouped:
-                grouped[project_id] = {
-                    stage_key: base_stage(project, stage_key, last_activity_at)
-                    for stage_key in stage_specs.keys()
-                }
+                grouped[project_id] = {}
+            if stage not in grouped[project_id]:
+                grouped[project_id][stage] = base_stage(project, stage, last_activity_at)
             bucket = grouped[project_id][stage]
             if last_activity_at and last_activity_at > bucket["last_activity_at"]:
                 bucket["last_activity_at"] = last_activity_at
@@ -690,12 +800,12 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
         if user.role == User.ROLE_ANNOTATOR:
             memberships = ProjectMembership.objects(user=user, role=ProjectMembership.ROLE_ANNOTATOR, is_active=True)
             for membership in memberships:
-                for stage in stage_specs.keys():
-                    ensure_stage(membership.project, stage, membership.updated_at or membership.created_at)
+                stage = getattr(membership.project, "task_type", TASK_BBOX_ANNOTATION) or TASK_BBOX_ANNOTATION
+                ensure_stage(membership.project, stage if stage in stage_specs else TASK_BBOX_ANNOTATION, membership.updated_at or membership.created_at)
         else:
             for project in Project.objects:
-                for stage in stage_specs.keys():
-                    ensure_stage(project, stage, project.updated_at or project.created_at)
+                stage = getattr(project, "task_type", TASK_BBOX_ANNOTATION) or TASK_BBOX_ANNOTATION
+                ensure_stage(project, stage if stage in stage_specs else TASK_BBOX_ANNOTATION, project.updated_at or project.created_at)
 
         assignments = list(
             Assignment.objects(annotator=user).order_by("queue_position", "-updated_at", "-created_at")
@@ -705,7 +815,8 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
 
         for assignment in assignments:
             project = assignment.project
-            bucket = ensure_stage(project, "bbox_annotation", assignment.updated_at or assignment.created_at)
+            stage = getattr(project, "task_type", TASK_BBOX_ANNOTATION) or TASK_BBOX_ANNOTATION
+            bucket = ensure_stage(project, stage if stage in stage_specs else TASK_BBOX_ANNOTATION, assignment.updated_at or assignment.created_at)
             workflow_meta = assignment.work_item.workflow_meta or {}
             if workflow_meta.get("validation_ready"):
                 bucket["validation_ready_count"] += 1
@@ -749,7 +860,7 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             else VideoChunkAssignment.objects(status__in=[VideoChunkAssignment.STATUS_ASSIGNED, VideoChunkAssignment.STATUS_IN_PROGRESS]).order_by("created_at")
         )
         for assignment in interval_chunk_assignments:
-            bucket = ensure_stage(assignment.project, "interval_annotation", assignment.updated_at or assignment.created_at)
+            bucket = ensure_stage(assignment.project, TASK_VIDEO_ANNOTATION, assignment.updated_at or assignment.created_at)
             bucket["interval_chunk_count"] += 1
             bucket["available_count"] += 1
             bucket["total_assignments"] += 1
@@ -764,7 +875,7 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
                 continue
             if user.role == User.ROLE_ANNOTATOR and str(assignment.interval.created_by.id) == str(user.id):
                 continue
-            bucket = ensure_stage(assignment.project, "interval_validation", assignment.updated_at or assignment.created_at)
+            bucket = ensure_stage(assignment.project, TASK_VIDEO_INTERVAL_VALIDATION, assignment.updated_at or assignment.created_at)
             bucket["interval_validation_count"] += 1
             bucket["available_count"] += 1
             bucket["total_assignments"] += 1
@@ -775,10 +886,27 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             else BBoxValidationAssignment.objects(status=BBoxValidationAssignment.STATUS_ASSIGNED).order_by("created_at")
         )
         for assignment in bbox_validation_assignments:
-            bucket = ensure_stage(assignment.project, "bbox_validation", assignment.updated_at or assignment.created_at)
+            bucket = ensure_stage(assignment.project, TASK_BBOX_VALIDATION, assignment.updated_at or assignment.created_at)
             bucket["bbox_validation_count"] += 1
             bucket["available_count"] += 1
             bucket["total_assignments"] += 1
+
+        generic_stages = {TASK_TEXT_ANNOTATION, TASK_IMAGE_ANNOTATION, TASK_CLASSIFICATION, TASK_COMPARISON}
+        for project in projects.values():
+            stage = getattr(project, "task_type", TASK_BBOX_ANNOTATION) or TASK_BBOX_ANNOTATION
+            if stage not in generic_stages:
+                continue
+            bucket = ensure_stage(project, stage, project.updated_at or project.created_at)
+            tasks = list(Task.objects(project=project))
+            if user.role == User.ROLE_ANNOTATOR:
+                tasks = [task for task in tasks if task.annotator is None or str(task.annotator.id) == str(user.id)]
+            bucket["available_count"] += sum(1 for task in tasks if task.status == Task.STATUS_PENDING)
+            bucket["active_count"] += sum(1 for task in tasks if task.status == Task.STATUS_IN_PROGRESS)
+            bucket["submitted_count"] += sum(1 for task in tasks if task.status == Task.STATUS_REVIEW)
+            bucket["accepted_count"] += sum(1 for task in tasks if task.status == Task.STATUS_COMPLETED)
+            bucket["rejected_count"] += sum(1 for task in tasks if task.status == Task.STATUS_REJECTED)
+            bucket["completed_count"] = bucket["accepted_count"] + bucket["rejected_count"]
+            bucket["total_assignments"] += len(tasks)
 
         available_projects = []
         active_projects = []
@@ -788,13 +916,15 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             for stage, bucket in stages.items():
                 pipeline_pending = False
                 if project:
-                    if stage == "interval_annotation":
+                    if stage == TASK_VIDEO_ANNOTATION:
                         pipeline_pending = VideoChunkAssignment.objects(project=project, status__in=[VideoChunkAssignment.STATUS_ASSIGNED, VideoChunkAssignment.STATUS_IN_PROGRESS]).count() > 0
-                    elif stage == "interval_validation":
+                    elif stage == TASK_VIDEO_INTERVAL_VALIDATION:
                         pipeline_pending = any(interval.created_by for interval in VideoInterval.objects(project=project, status=VideoInterval.STATUS_DRAFT))
-                    elif stage == "bbox_annotation":
+                    elif stage == TASK_BBOX_ANNOTATION:
                         pipeline_pending = Assignment.objects(project=project, status__in=[Assignment.STATUS_ASSIGNED, Assignment.STATUS_IN_PROGRESS, Assignment.STATUS_DRAFT]).count() > 0
-                    elif stage == "bbox_validation":
+                    elif stage in generic_stages:
+                        pipeline_pending = Task.objects(project=project, status__in=[Task.STATUS_PENDING, Task.STATUS_IN_PROGRESS]).count() > 0
+                    elif stage == TASK_BBOX_VALIDATION:
                         pipeline_pending = WorkItem.objects(project=project, status=WorkItem.STATUS_COMPLETED, validation_status=WorkItem.VALIDATION_PENDING).count() > 0
                 if bucket["active_assignment_id"] or (pipeline_pending and bucket["available_count"] == 0):
                     active_projects.append(bucket)
@@ -853,12 +983,19 @@ class AnnotatorProjectDetailView(AuthenticatedAPIView):
             if user.role == User.ROLE_ANNOTATOR
             else BBoxValidationAssignment.objects(project=project, status=BBoxValidationAssignment.STATUS_ASSIGNED).count()
         )
+        generic_tasks = list(Task.objects(project=project))
+        if user.role == User.ROLE_ANNOTATOR:
+            generic_tasks = [task for task in generic_tasks if task.annotator is None or str(task.annotator.id) == str(user.id)]
         overview = project_overview(project)
 
         payload = {
             "project_id": str(project.id),
             "project_title": project.title,
             "project_status": project.status,
+            "task_type": getattr(project, "task_type", "bbox_annotation") or "bbox_annotation",
+            "widget_type": getattr(project, "widget_type", "bbox") or "bbox",
+            "source_project_id": str(project.source_project.id) if getattr(project, "source_project", None) else None,
+            "source_project_title": project.source_project.title if getattr(project, "source_project", None) else "",
             "description": project.description,
             "instructions": project.instructions,
             "instructions_file_uri": project.instructions_file_uri or "",
@@ -869,13 +1006,13 @@ class AnnotatorProjectDetailView(AuthenticatedAPIView):
             "frame_interval_sec": project.frame_interval_sec,
             "participant_rules": project.participant_rules or {},
             "stats": {
-                "available_count": sum(1 for item in assignments if item.status == Assignment.STATUS_ASSIGNED),
-                "active_count": sum(1 for item in assignments if item.status in [Assignment.STATUS_IN_PROGRESS, Assignment.STATUS_DRAFT]),
-                "submitted_count": sum(1 for item in assignments if item.status == Assignment.STATUS_SUBMITTED),
-                "accepted_count": sum(1 for item in assignments if item.status == Assignment.STATUS_ACCEPTED),
-                "rejected_count": sum(1 for item in assignments if item.status == Assignment.STATUS_REJECTED),
-                "completed_count": sum(1 for item in assignments if item.status in [Assignment.STATUS_ACCEPTED, Assignment.STATUS_REJECTED]),
-                "total_assignments": len(assignments),
+                "available_count": sum(1 for item in assignments if item.status == Assignment.STATUS_ASSIGNED) + sum(1 for task in generic_tasks if task.status == Task.STATUS_PENDING),
+                "active_count": sum(1 for item in assignments if item.status in [Assignment.STATUS_IN_PROGRESS, Assignment.STATUS_DRAFT]) + sum(1 for task in generic_tasks if task.status == Task.STATUS_IN_PROGRESS),
+                "submitted_count": sum(1 for item in assignments if item.status == Assignment.STATUS_SUBMITTED) + sum(1 for task in generic_tasks if task.status == Task.STATUS_REVIEW),
+                "accepted_count": sum(1 for item in assignments if item.status == Assignment.STATUS_ACCEPTED) + sum(1 for task in generic_tasks if task.status == Task.STATUS_COMPLETED),
+                "rejected_count": sum(1 for item in assignments if item.status == Assignment.STATUS_REJECTED) + sum(1 for task in generic_tasks if task.status == Task.STATUS_REJECTED),
+                "completed_count": sum(1 for item in assignments if item.status in [Assignment.STATUS_ACCEPTED, Assignment.STATUS_REJECTED]) + sum(1 for task in generic_tasks if task.status in [Task.STATUS_COMPLETED, Task.STATUS_REJECTED]),
+                "total_assignments": len(assignments) + len(generic_tasks),
                 "batch_count": len({item.work_item.workflow_meta.get("task_batch_id") for item in assignments if item.work_item.workflow_meta.get("task_batch_id")}),
                 "validation_ready_count": sum(1 for item in assignments if item.work_item.workflow_meta.get("validation_ready")),
                 "validation_pending_count": sum(1 for item in WorkItem.objects(project=project) if item.validation_status == WorkItem.VALIDATION_PENDING),
@@ -917,6 +1054,10 @@ class AnnotatorProjectNextAssignmentView(AuthenticatedAPIView):
         if active_assignment:
             return Response({"assignment_id": str(active_assignment.id), "source": "active"}, status=status.HTTP_200_OK)
 
+        golden_assignment = maybe_create_hidden_golden_assignment(project, user)
+        if golden_assignment:
+            return Response({"assignment_id": golden_assignment_public_id(golden_assignment), "source": "golden_annotation"}, status=status.HTTP_200_OK)
+
         next_assignment = next((item for item in assignments if item.status == Assignment.STATUS_ASSIGNED), None)
         if next_assignment:
             return Response({"assignment_id": str(next_assignment.id), "source": "available"}, status=status.HTTP_200_OK)
@@ -930,6 +1071,16 @@ class AnnotatorAssignmentDetailView(AuthenticatedAPIView):
             user = self.get_user(request)
         except PermissionError:
             return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        golden_assignment_id = parse_golden_assignment_public_id(assignment_id)
+        if golden_assignment_id:
+            if not ObjectId.is_valid(golden_assignment_id):
+                return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
+            golden_assignment = GoldenAnnotationAssignment.objects(id=ObjectId(golden_assignment_id)).first()
+            if not golden_assignment:
+                return Response({"detail": "Assignment not found"}, status=status.HTTP_404_NOT_FOUND)
+            if user.role != User.ROLE_ADMIN and str(golden_assignment.annotator.id) != str(user.id):
+                return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+            return Response(golden_annotation_assignment_payload(golden_assignment), status=status.HTTP_200_OK)
         if not ObjectId.is_valid(assignment_id):
             return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
         assignment = Assignment.objects(id=ObjectId(assignment_id)).first()
@@ -981,6 +1132,35 @@ class AnnotatorAssignmentSubmitView(AuthenticatedAPIView):
             user = self.get_user(request)
         except PermissionError:
             return Response({"detail": "Unauthorized"}, status=status.HTTP_401_UNAUTHORIZED)
+        golden_assignment_id = parse_golden_assignment_public_id(assignment_id)
+        if golden_assignment_id:
+            if not ObjectId.is_valid(golden_assignment_id):
+                return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
+            golden_assignment = GoldenAnnotationAssignment.objects(id=ObjectId(golden_assignment_id)).first()
+            if not golden_assignment:
+                return Response({"detail": "Assignment not found"}, status=status.HTTP_404_NOT_FOUND)
+            if user.role != User.ROLE_ADMIN and str(golden_assignment.annotator.id) != str(user.id):
+                return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+            serializer = AssignmentSubmitSerializer(
+                data=request.data,
+                context={"assignment": None, "frame": golden_assignment.golden_frame.frame, "label_schema": golden_assignment.project.label_schema or []},
+            )
+            serializer.is_valid(raise_exception=True)
+            attempt, evaluation = submit_golden_annotation_assignment(
+                golden_assignment,
+                serializer.validated_data["label_data"],
+                serializer.validated_data.get("comment", ""),
+                serializer.validated_data.get("is_final", True),
+            )
+            return Response(
+                {
+                    "annotation_id": str(attempt.id) if attempt else golden_assignment_public_id(golden_assignment),
+                    "assignment_status": golden_assignment.status,
+                    "annotation_status": "submitted" if attempt else "draft",
+                    "evaluation": evaluation,
+                },
+                status=status.HTTP_200_OK,
+            )
         if not ObjectId.is_valid(assignment_id):
             return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
         assignment = Assignment.objects(id=ObjectId(assignment_id)).first()

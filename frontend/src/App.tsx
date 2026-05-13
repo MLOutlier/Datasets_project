@@ -19,6 +19,7 @@ import ProjectsPage from "./pages/ProjectsPage";
 import ProjectWorkflowPage from "./pages/ProjectWorkflowPage";
 import VideoIntervalsPage from "./pages/VideoIntervalsPage";
 import BBoxValidationPage from "./pages/BBoxValidationPage";
+import GenericLabelingPage from "./pages/GenericLabelingPage";
 
 import AnnotationPage from "./pages/AnnotationPage";
 import AnnotatorProjectPage from "./pages/AnnotatorProjectPage";
@@ -94,6 +95,16 @@ export default function App() {
           <RequireAuth>
             <Layout>
               <BBoxValidationPage />
+            </Layout>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/labeling/generic/:projectId"
+        element={
+          <RequireAuth>
+            <Layout>
+              <GenericLabelingPage />
             </Layout>
           </RequireAuth>
         }

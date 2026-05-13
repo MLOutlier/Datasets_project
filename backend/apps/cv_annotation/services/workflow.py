@@ -16,11 +16,19 @@ from bson import ObjectId
 from mongoengine import Q
 
 from apps.projects.models import Project, ProjectMembership
+from apps.projects.task_registry import (
+    TASK_BBOX_ANNOTATION,
+    TASK_BBOX_VALIDATION,
+    TASK_VIDEO_ANNOTATION,
+    TASK_VIDEO_INTERVAL_VALIDATION,
+)
 from apps.users.models import User
 from ..models import (
     Assignment,
     BBoxValidationAssignment,
     FrameItem,
+    GoldenAnnotationAssignment,
+    GoldenAttempt,
     GoldenFrame,
     ImportAsset,
     ImportSession,
@@ -51,6 +59,7 @@ DEFAULT_VIDEO_CHUNK_DURATION_SEC = 45
 DEFAULT_VIDEO_CHUNK_MIN_DURATION_SEC = 30
 DEFAULT_VIDEO_CHUNK_MAX_DURATION_SEC = 60
 DEFAULT_INTERVAL_REVIEW_PADDING_SEC = 2.0
+DEFAULT_ANNOTATION_GOLDEN_INTERVAL = 9
 DEFAULT_STUCK_ASSIGNMENT_TTL_MINUTES = 120
 DEFAULT_GOLDEN_CANDIDATE_THRESHOLD = 0.9
 DEFAULT_GOLDEN_PROMOTION_TARGET = 10
@@ -89,6 +98,7 @@ def workflow_runtime_settings(project: Project) -> dict:
         "video_chunk_min_duration_sec": _int_rule(project, "video_chunk_min_duration_sec", DEFAULT_VIDEO_CHUNK_MIN_DURATION_SEC),
         "video_chunk_max_duration_sec": _int_rule(project, "video_chunk_max_duration_sec", DEFAULT_VIDEO_CHUNK_MAX_DURATION_SEC),
         "interval_review_padding_sec": _float_rule(project, "interval_review_padding_sec", DEFAULT_INTERVAL_REVIEW_PADDING_SEC, minimum=0.0, maximum=30.0),
+        "annotation_golden_interval": _int_rule(project, "annotation_golden_interval", DEFAULT_ANNOTATION_GOLDEN_INTERVAL),
         "stuck_assignment_ttl_minutes": _int_rule(project, "stuck_assignment_ttl_minutes", DEFAULT_STUCK_ASSIGNMENT_TTL_MINUTES),
         "golden_candidate_threshold": _float_rule(project, "golden_candidate_threshold", DEFAULT_GOLDEN_CANDIDATE_THRESHOLD),
         "golden_promotion_target": _int_rule(project, "golden_promotion_target", DEFAULT_GOLDEN_PROMOTION_TARGET),
@@ -101,6 +111,14 @@ def workflow_runtime_settings(project: Project) -> dict:
             maximum=1.0,
         ),
     }
+
+
+def _task_type(project: Project) -> str:
+    return str(getattr(project, "task_type", "") or TASK_BBOX_ANNOTATION)
+
+
+def _is_task(project: Project, *task_types: str) -> bool:
+    return _task_type(project) in task_types
 
 
 def _workflow_meta_set(obj, **updates) -> dict:
@@ -293,7 +311,11 @@ def process_import_asset(asset: ImportAsset, interval_sec: float) -> ImportAsset
                 "video_frames_extracted": len(extracted),
             }
             asset.metadata["intervals"] = {"created": 0, "updated": 0, "intervals_total": 0, "mode": "manual_executor_stage"}
-            asset.metadata["chunk_tasks"] = create_video_chunk_tasks_for_asset(asset)
+            asset.metadata["chunk_tasks"] = (
+                create_video_chunk_tasks_for_asset(asset)
+                if _is_task(asset.project, TASK_VIDEO_ANNOTATION)
+                else {"tasks_created": 0, "assignments_created": 0, "skipped_for_task_type": _task_type(asset.project)}
+            )
         asset.processing_status = ImportAsset.STATUS_PROCESSED
         asset.error_message = ""
     except FrameExtractionError as exc:
@@ -544,6 +566,8 @@ def _video_chunk_size_frames(asset: ImportAsset, frames: List[FrameItem], chunk_
 
 
 def create_video_chunk_tasks_for_asset(asset: ImportAsset, chunk_size_frames: int | None = None) -> dict:
+    if not _is_task(asset.project, TASK_VIDEO_ANNOTATION):
+        return {"tasks_created": 0, "assignments_created": 0, "skipped_for_task_type": _task_type(asset.project)}
     if asset.asset_type != ImportAsset.TYPE_VIDEO:
         return {"tasks_created": 0, "assignments_created": 0}
     project = asset.project
@@ -771,12 +795,14 @@ def _finalize_interval_if_ready(interval: VideoInterval, min_validators: int | N
         "validation_final_status": interval.status,
     }
     interval.save()
-    if interval.status == VideoInterval.STATUS_APPROVED:
+    if interval.status == VideoInterval.STATUS_APPROVED and _is_task(interval.project, TASK_BBOX_ANNOTATION):
         _create_work_items_from_approved_interval(interval)
     return True
 
 
 def ensure_interval_validation_assignments(project: Project, min_validators: int | None = None) -> int:
+    if not _is_task(project, TASK_VIDEO_INTERVAL_VALIDATION):
+        return 0
     # NOTE: Fixed issue where intervals could become locked after first annotator.
     # We now consider intervals regardless of current status, ensuring they are
     # available for validation until the required number of validators is met.
@@ -1143,6 +1169,21 @@ def _build_asset_batches(asset: ImportAsset, frames: List[FrameItem], project: P
 def create_work_items_for_import(import_session: ImportSession) -> Dict[str, int]:
     project = import_session.project
     processed_assets = list(ImportAsset.objects(import_session=import_session, processing_status=ImportAsset.STATUS_PROCESSED))
+    if not _is_task(project, TASK_BBOX_ANNOTATION):
+        preview = build_import_preview(import_session)
+        import_session.preview = preview
+        import_session.summary = {
+            "work_items_created": 0,
+            "assignments_created": 0,
+            "frame_ids": [],
+            "workflow_batches_total": 0,
+            "validation_ready_items": 0,
+            "workflow_settings": _workflow_settings(project),
+            "skipped_for_task_type": _task_type(project),
+        }
+        import_session.status = ImportSession.STATUS_FINALIZED if processed_assets else ImportSession.STATUS_FAILED
+        import_session.save()
+        return import_session.summary
     frame_ids = []
     created_work_items = 0
     created_assignments = 0
@@ -1152,15 +1193,7 @@ def create_work_items_for_import(import_session: ImportSession) -> Dict[str, int
     local_assignment_counts: Dict[str, int] = {}
     for asset in processed_assets:
         if asset.asset_type == ImportAsset.TYPE_VIDEO:
-            approved_intervals = list(
-                VideoInterval.objects(project=project, asset=asset, status=VideoInterval.STATUS_APPROVED).order_by("start_frame")
-            )
-            approved_ranges = [(int(interval.start_frame), int(interval.end_frame)) for interval in approved_intervals]
-            asset_frames = [
-                frame
-                for frame in FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at")
-                if any(start <= int(frame.frame_number) <= end for start, end in approved_ranges)
-            ]
+            asset_frames = list(FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at"))
         else:
             asset_frames = list(FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at"))
         batch_entries = _build_asset_batches(asset, asset_frames, project)
@@ -1706,6 +1739,16 @@ def resolve_validation_batch(project: Project, task_batch_id: str, actor: User, 
     }
 
 
+def _clone_annotation(annotation: dict) -> dict:
+    return json.loads(json.dumps(annotation or {"boxes": []}))
+
+
+def _active_golden_frames(project: Project, limit: int | None = None) -> List[GoldenFrame]:
+    query = GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_ACTIVE).order_by("-candidate_score", "-created_at")
+    items = list(query.limit(limit)) if limit else list(query)
+    return items
+
+
 def _golden_reference_threshold(project: Project) -> float:
     settings = workflow_runtime_settings(project)
     return max(float(project.agreement_threshold or 0.0), float(settings["golden_candidate_threshold"]))
@@ -1725,14 +1768,13 @@ def _register_golden_candidate(work_item: WorkItem, source: str) -> Optional[Gol
     candidate = GoldenFrame.objects(project=work_item.project, frame=work_item.frame).first()
     if not candidate:
         candidate = GoldenFrame(project=work_item.project, frame=work_item.frame)
-    if candidate.is_active:
+    if candidate.status == GoldenFrame.STATUS_ACTIVE:
         return candidate
     candidate.reference_annotation = {"boxes": boxes}
     candidate.source_work_item = work_item
     candidate.candidate_score = float(work_item.agreement_score or 0.0)
     candidate.candidate_source = source
-    candidate.is_candidate = True
-    candidate.is_active = False
+    candidate.status = GoldenFrame.STATUS_CANDIDATE
     candidate.review_notes = str((work_item.workflow_meta or {}).get("bbox_validation_summary", {}).get("status") or "")
     candidate.save()
     log_security_event(
@@ -1750,14 +1792,26 @@ def _register_golden_candidate(work_item: WorkItem, source: str) -> Optional[Gol
 
 
 def _ensure_golden_frames(project: Project, target_count: int = 10) -> List[GoldenFrame]:
-    active = list(GoldenFrame.objects(project=project, is_active=True).order_by("-candidate_score", "-created_at"))
-    if len(active) >= target_count:
-        return active
-    return active
+    return _active_golden_frames(project, limit=target_count)
+
+
+def _golden_attempt_rates(golden: GoldenFrame) -> dict:
+    annotation_seen = int(golden.annotation_seen or 0)
+    validation_seen = int(golden.validation_seen or 0)
+    return {
+        "annotation_seen": annotation_seen,
+        "annotation_passed": int(golden.annotation_passed or 0),
+        "annotation_failed": int(golden.annotation_failed or 0),
+        "annotation_pass_rate": round(float(golden.annotation_passed or 0) / annotation_seen, 4) if annotation_seen else 0.0,
+        "validation_seen": validation_seen,
+        "validation_passed": int(golden.validation_passed or 0),
+        "validation_failed": int(golden.validation_failed or 0),
+        "validation_pass_rate": round(float(golden.validation_passed or 0) / validation_seen, 4) if validation_seen else 0.0,
+    }
 
 
 def list_golden_candidates(project: Project) -> List[dict]:
-    items = list(GoldenFrame.objects(project=project, is_candidate=True).order_by("-candidate_score", "-created_at"))
+    items = list(GoldenFrame.objects(project=project).order_by("status", "-candidate_score", "-created_at"))
     return [
         {
             "golden_frame_id": str(item.id),
@@ -1769,11 +1823,13 @@ def list_golden_candidates(project: Project) -> List[dict]:
             "height": item.frame.height,
             "candidate_score": float(item.candidate_score or 0.0),
             "candidate_source": item.candidate_source or "",
-            "is_active": bool(item.is_active),
-            "is_candidate": bool(item.is_candidate),
+            "status": item.status or (GoldenFrame.STATUS_ACTIVE if item.is_active else GoldenFrame.STATUS_CANDIDATE),
+            "is_active": item.status == GoldenFrame.STATUS_ACTIVE,
+            "is_candidate": item.status in {GoldenFrame.STATUS_CANDIDATE, GoldenFrame.STATUS_ACTIVE},
             "promoted_at": item.promoted_at,
             "review_notes": item.review_notes or "",
             "reference_annotation": {"boxes": _normalize_boxes(item.reference_annotation)},
+            "stats": _golden_attempt_rates(item),
         }
         for item in items
     ]
@@ -1785,8 +1841,7 @@ def promote_golden_candidate(project: Project, golden_frame_id: str, actor: User
     golden = GoldenFrame.objects(id=ObjectId(golden_frame_id), project=project).first()
     if not golden:
         raise ValueError("Golden candidate not found")
-    golden.is_candidate = True
-    golden.is_active = True
+    golden.status = GoldenFrame.STATUS_ACTIVE
     golden.promoted_by = actor
     golden.promoted_at = datetime.utcnow()
     if review_notes:
@@ -1805,9 +1860,98 @@ def promote_golden_candidate(project: Project, golden_frame_id: str, actor: User
     )
     return {
         "golden_frame_id": str(golden.id),
-        "is_active": golden.is_active,
-        "is_candidate": golden.is_candidate,
+        "status": golden.status,
+        "is_active": golden.status == GoldenFrame.STATUS_ACTIVE,
+        "is_candidate": golden.status in {GoldenFrame.STATUS_CANDIDATE, GoldenFrame.STATUS_ACTIVE},
         "promoted_at": golden.promoted_at,
+    }
+
+
+def retire_golden_frame(project: Project, golden_frame_id: str, actor: User, review_notes: str = "") -> dict:
+    if not ObjectId.is_valid(golden_frame_id):
+        raise ValueError("Invalid golden frame id")
+    golden = GoldenFrame.objects(id=ObjectId(golden_frame_id), project=project).first()
+    if not golden:
+        raise ValueError("Golden frame not found")
+    golden.status = GoldenFrame.STATUS_RETIRED
+    if review_notes:
+        golden.review_notes = review_notes
+    golden.save()
+    log_security_event(
+        project=project,
+        actor=actor,
+        event_type=SecurityEvent.EVENT_GOLDEN_PROMOTED,
+        payload={"golden_frame_id": str(golden.id), "frame_id": str(golden.frame.id), "retired": True, "review_notes": review_notes},
+        severity="warning",
+    )
+    return {"golden_frame_id": str(golden.id), "status": golden.status, "is_active": False, "is_candidate": False}
+
+
+def _project_label_names(project: Project) -> List[str]:
+    labels = []
+    for item in project.label_schema or []:
+        name = str(item.get("name") or item.get("label") or "").strip()
+        if name and name not in labels:
+            labels.append(name)
+    return labels
+
+
+def _shift_box_badly(box: dict, frame: FrameItem) -> dict:
+    shifted = dict(box)
+    max_width = max(float(frame.width or 0), 1.0)
+    max_height = max(float(frame.height or 0), 1.0)
+    width = max(float(shifted.get("width") or 1.0), 1.0)
+    height = max(float(shifted.get("height") or 1.0), 1.0)
+    shifted["x"] = round(min(max(float(box.get("x") or 0.0) + max(width * 1.5, max_width * 0.25), 0.0), max(max_width - width, 0.0)), 2)
+    shifted["y"] = round(min(max(float(box.get("y") or 0.0) + max(height * 1.5, max_height * 0.25), 0.0), max(max_height - height, 0.0)), 2)
+    if _iou(box, shifted) >= 0.5:
+        shifted["x"] = 0.0 if float(box.get("x") or 0.0) > max_width / 2 else max(max_width - width, 0.0)
+        shifted["y"] = 0.0 if float(box.get("y") or 0.0) > max_height / 2 else max(max_height - height, 0.0)
+    return shifted
+
+
+def _extra_box_for_frame(frame: FrameItem, label: str) -> dict:
+    width = max(round(float(frame.width or 100) * 0.12, 2), 8.0)
+    height = max(round(float(frame.height or 100) * 0.12, 2), 8.0)
+    return {"x": 1.0, "y": 1.0, "width": width, "height": height, "label": label}
+
+
+def _build_golden_validation_question(golden: GoldenFrame, seed: str = "") -> dict:
+    reference = {"boxes": _normalize_boxes(golden.reference_annotation)}
+    boxes = _clone_annotation(reference).get("boxes", [])
+    label_names = _project_label_names(golden.project)
+    issue_types = ["correct", "missing_box", "bad_geometry", "wrong_label", "extra_box"]
+    if not boxes:
+        issue_types = ["correct", "extra_box"]
+    elif len(label_names) < 2:
+        issue_types.remove("wrong_label")
+    digest = hashlib.sha256(f"{golden.id}:{seed}".encode("utf-8")).hexdigest()
+    issue_type = issue_types[int(digest[:8], 16) % len(issue_types)]
+    probe = {"boxes": _clone_annotation(reference).get("boxes", [])}
+    expected_decision = "approve"
+
+    if issue_type == "missing_box":
+        probe["boxes"] = probe["boxes"][1:] if len(probe["boxes"]) > 1 else []
+        expected_decision = "needs_changes"
+    elif issue_type == "bad_geometry" and probe["boxes"]:
+        probe["boxes"][0] = _shift_box_badly(probe["boxes"][0], golden.frame)
+        expected_decision = "needs_changes"
+    elif issue_type == "wrong_label" and probe["boxes"]:
+        current_label = str(probe["boxes"][0].get("label") or "")
+        replacement = next((label for label in label_names if label != current_label), None)
+        if replacement:
+            probe["boxes"][0] = {**probe["boxes"][0], "label": replacement}
+        expected_decision = "needs_changes"
+    elif issue_type == "extra_box":
+        label = str((boxes[0] if boxes else {}).get("label") or (label_names[0] if label_names else "object"))
+        probe["boxes"].append(_extra_box_for_frame(golden.frame, label))
+        expected_decision = "needs_changes"
+
+    return {
+        "golden_id": str(golden.id),
+        "probe_annotation": probe,
+        "expected_decision": expected_decision,
+        "issue_type": issue_type,
     }
 
 
@@ -1818,8 +1962,9 @@ def _bbox_validation_real_payload(work_item: WorkItem) -> dict:
     return payload
 
 
-def _bbox_validation_golden_payload(golden: GoldenFrame) -> dict:
+def _bbox_validation_golden_payload(golden: GoldenFrame, question: Optional[dict] = None) -> dict:
     frame = golden.frame
+    probe_annotation = (question or {}).get("probe_annotation") or {"boxes": _normalize_boxes(golden.reference_annotation)}
     return {
         "golden_id": str(golden.id),
         "frame_id": str(frame.id),
@@ -1829,7 +1974,7 @@ def _bbox_validation_golden_payload(golden: GoldenFrame) -> dict:
         "width": frame.width,
         "height": frame.height,
         "question_id": str(golden.id),
-        "candidate_annotation": {"boxes": _normalize_boxes(golden.reference_annotation)},
+        "candidate_annotation": {"boxes": _normalize_boxes(probe_annotation)},
     }
 
 
@@ -1839,6 +1984,8 @@ def ensure_bbox_validation_assignments(
     real_items_per_batch: int | None = None,
     golden_items_per_batch: int | None = None,
 ) -> int:
+    if not _is_task(project, TASK_BBOX_VALIDATION):
+        return 0
     settings = workflow_runtime_settings(project)
     required_validators = min_validators or settings["bbox_validators_per_batch"]
     real_batch_size = real_items_per_batch or settings["bbox_real_items_per_batch"]
@@ -1874,12 +2021,13 @@ def ensure_bbox_validation_assignments(
         for validator in candidates:
             eligible_items = []
             for item in items:
+                source_author_ids = {str(author_id) for author_id in (item.workflow_meta or {}).get("source_author_ids", [])}
                 authored = WorkAnnotation.objects(
                     work_item=item,
                     annotator=validator,
                     status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED],
                 ).first()
-                if not authored:
+                if not authored and str(validator.id) not in source_author_ids:
                     eligible_items.append(item)
             real_ids = [str(item.id) for item in eligible_items[:real_batch_size]]
             if not real_ids:
@@ -1887,12 +2035,18 @@ def ensure_bbox_validation_assignments(
             existing = BBoxValidationAssignment.objects(project=project, validator=validator, work_item_ids=real_ids).first()
             if existing:
                 continue
-            golden_ids = [str(frame.id) for frame in golden_frames[:golden_batch_size]]
+            selected_golden = golden_frames[:golden_batch_size]
+            golden_questions = [
+                _build_golden_validation_question(golden, seed=f"{validator.id}:{start}:{index}")
+                for index, golden in enumerate(selected_golden, start=1)
+            ]
+            golden_ids = [question["golden_id"] for question in golden_questions]
             BBoxValidationAssignment(
                 project=project,
                 validator=validator,
                 work_item_ids=real_ids,
                 golden_frame_ids=golden_ids,
+                golden_questions=golden_questions,
                 status=BBoxValidationAssignment.STATUS_ASSIGNED,
             ).save()
             created += 1
@@ -1917,6 +2071,7 @@ def _required_bbox_validation_votes(work_item: WorkItem, min_validators: int | N
         for annotation in WorkAnnotation.objects(work_item=work_item, status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED])
         if annotation.annotator
     }
+    authors.update(str(author_id) for author_id in (work_item.workflow_meta or {}).get("source_author_ids", []))
     candidates = select_annotators_for_project(work_item.project, 50, stage="bbox_validation")
     eligible = [user for user in candidates if str(user.id) not in authors]
     return min(required, len(eligible))
@@ -1946,9 +2101,12 @@ def bbox_validation_queue_for_annotator(user: User) -> List[dict]:
             )
         ]
         # Exclude items where the validator already has a submitted or accepted annotation
-        real_items = [
-            wi for wi in all_real_items if not WorkAnnotation.objects(work_item=wi, annotator=user, status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED]).first()
-        ]
+        real_items = []
+        for wi in all_real_items:
+            source_author_ids = {str(author_id) for author_id in (wi.workflow_meta or {}).get("source_author_ids", [])}
+            authored = WorkAnnotation.objects(work_item=wi, annotator=user, status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED]).first()
+            if not authored and str(user.id) not in source_author_ids:
+                real_items.append(wi)
         real_lookup = {str(wi.id): wi for wi in real_items}
         ordered_real = [real_lookup[wid] for wid in item.work_item_ids if wid in real_lookup]
         # Load golden frames (always included, no need to filter by author)
@@ -1957,11 +2115,15 @@ def bbox_validation_queue_for_annotator(user: User) -> List[dict]:
             for g in GoldenFrame.objects(
                 project=item.project,
                 id__in=[ObjectId(gid) for gid in item.golden_frame_ids if ObjectId.is_valid(gid)],
-                is_active=True,
+                status=GoldenFrame.STATUS_ACTIVE,
             )
         ]
         golden_lookup = {str(g.id): g for g in golden_items}
         ordered_golden = [golden_lookup[gid] for gid in item.golden_frame_ids if gid in golden_lookup]
+        question_lookup = {
+            str(question.get("golden_id") or ""): question
+            for question in (item.golden_questions or [])
+        }
         ordered_real_ids = [str(wi.id) for wi in ordered_real]
         ordered_golden_ids = [str(g.id) for g in ordered_golden]
         sequence = [
@@ -1982,7 +2144,7 @@ def bbox_validation_queue_for_annotator(user: User) -> List[dict]:
                 "project_title": item.project.title,
                 "questions": [
                     *[_bbox_validation_real_payload(wi) for wi in ordered_real],
-                    *[_bbox_validation_golden_payload(g) for g in ordered_golden],
+                    *[_bbox_validation_golden_payload(g, question_lookup.get(str(g.id))) for g in ordered_golden],
                 ],
                 "total": len(sequence),
                 "current_index": 1 if sequence else 0,
@@ -2005,18 +2167,42 @@ def submit_bbox_validation_assignment(
         GoldenFrame.objects(
             project=assignment.project,
             id__in=[ObjectId(golden_id) for golden_id in assignment.golden_frame_ids if ObjectId.is_valid(golden_id)],
-            is_active=True,
+            status=GoldenFrame.STATUS_ACTIVE,
         )
     )
+    question_lookup = {
+        str(question.get("golden_id") or ""): question
+        for question in (assignment.golden_questions or [])
+    }
     all_decisions = {**decisions, **golden_decisions}
     golden_total = len(golden_frames)
     golden_correct = 0
     for golden in golden_frames:
         decision = str(all_decisions.get(str(golden.id), "")).strip().lower()
-        reference_boxes = _normalize_boxes(golden.reference_annotation)
-        expected_decision = "approve" if reference_boxes or golden.reference_annotation == {"boxes": []} else "needs_changes"
-        if decision == expected_decision:
+        question = question_lookup.get(str(golden.id)) or _build_golden_validation_question(golden, seed=str(assignment.id))
+        expected_decision = str(question.get("expected_decision") or "approve").strip().lower()
+        passed = decision == expected_decision
+        if passed:
             golden_correct += 1
+        GoldenAttempt(
+            project=assignment.project,
+            golden_frame=golden,
+            user=assignment.validator,
+            stage=GoldenAttempt.STAGE_VALIDATION,
+            validation_assignment=assignment,
+            decision=decision,
+            probe_annotation=question.get("probe_annotation") or {},
+            reference_annotation={"boxes": _normalize_boxes(golden.reference_annotation)},
+            score=1.0 if passed else 0.0,
+            passed=passed,
+            issue_type=str(question.get("issue_type") or ""),
+        ).save()
+        golden.validation_seen = int(golden.validation_seen or 0) + 1
+        if passed:
+            golden.validation_passed = int(golden.validation_passed or 0) + 1
+        else:
+            golden.validation_failed = int(golden.validation_failed or 0) + 1
+        golden.save()
     score = round(golden_correct / golden_total, 4) if golden_total else 1.0
     for work_item_id in all_decisions.keys():
         if not ObjectId.is_valid(work_item_id):
@@ -2351,7 +2537,7 @@ def _evaluate_golden_answers(review: ReviewRecord, resolution: dict) -> dict:
     golden_ids = review.golden_frame_ids or []
     if not golden_ids:
         return {"golden_total": 0, "golden_errors": 0, "golden_score": 1.0}
-    golden_frames = list(GoldenFrame.objects(id__in=golden_ids, is_active=True))
+    golden_frames = list(GoldenFrame.objects(id__in=golden_ids, status=GoldenFrame.STATUS_ACTIVE))
     total = len(golden_frames)
     if total == 0:
         return {"golden_total": 0, "golden_errors": 0, "golden_score": 1.0}
@@ -2363,6 +2549,142 @@ def _evaluate_golden_answers(review: ReviewRecord, resolution: dict) -> dict:
     errors = sum(1 for score in scores if score < 0.8)
     passed = total - errors
     return {"golden_total": total, "golden_errors": errors, "golden_score": round(passed / total, 4)}
+
+
+GOLDEN_ASSIGNMENT_PREFIX = "golden_"
+
+
+def golden_assignment_public_id(assignment: GoldenAnnotationAssignment) -> str:
+    return f"{GOLDEN_ASSIGNMENT_PREFIX}{assignment.id}"
+
+
+def parse_golden_assignment_public_id(public_id: str) -> str:
+    value = str(public_id or "")
+    return value[len(GOLDEN_ASSIGNMENT_PREFIX) :] if value.startswith(GOLDEN_ASSIGNMENT_PREFIX) else ""
+
+
+def maybe_create_hidden_golden_assignment(project: Project, annotator: User) -> Optional[GoldenAnnotationAssignment]:
+    if annotator.role != User.ROLE_ANNOTATOR:
+        return None
+    existing = GoldenAnnotationAssignment.objects(
+        project=project,
+        annotator=annotator,
+        status__in=[
+            GoldenAnnotationAssignment.STATUS_ASSIGNED,
+            GoldenAnnotationAssignment.STATUS_IN_PROGRESS,
+            GoldenAnnotationAssignment.STATUS_DRAFT,
+        ],
+    ).order_by("created_at").first()
+    if existing:
+        return existing
+
+    settings = workflow_runtime_settings(project)
+    interval = max(1, int(settings["annotation_golden_interval"] or DEFAULT_ANNOTATION_GOLDEN_INTERVAL))
+    ordinary_submitted = Assignment.objects(
+        project=project,
+        annotator=annotator,
+        status__in=[Assignment.STATUS_SUBMITTED, Assignment.STATUS_ACCEPTED, Assignment.STATUS_REJECTED],
+    ).count()
+    due_slots = ordinary_submitted // interval
+    completed_golden = GoldenAttempt.objects(project=project, user=annotator, stage=GoldenAttempt.STAGE_ANNOTATION).count()
+    if due_slots <= completed_golden:
+        return None
+
+    attempted_ids = {
+        str(attempt.golden_frame.id)
+        for attempt in GoldenAttempt.objects(project=project, user=annotator, stage=GoldenAttempt.STAGE_ANNOTATION)
+    }
+    eligible = [golden for golden in _active_golden_frames(project) if str(golden.id) not in attempted_ids]
+    if not eligible:
+        return None
+    golden = sorted(eligible, key=lambda item: (int(item.annotation_seen or 0), -float(item.candidate_score or 0.0), str(item.id)))[0]
+    assignment = GoldenAnnotationAssignment(project=project, annotator=annotator, golden_frame=golden)
+    try:
+        assignment.save()
+    except Exception:
+        assignment = GoldenAnnotationAssignment.objects(project=project, annotator=annotator, golden_frame=golden).first()
+    return assignment
+
+
+def golden_annotation_assignment_payload(assignment: GoldenAnnotationAssignment) -> dict:
+    if assignment.status == GoldenAnnotationAssignment.STATUS_ASSIGNED:
+        assignment.status = GoldenAnnotationAssignment.STATUS_IN_PROGRESS
+        if not assignment.started_at:
+            assignment.started_at = datetime.utcnow()
+        assignment.save()
+    golden = assignment.golden_frame
+    frame = golden.frame
+    return {
+        "assignment_id": golden_assignment_public_id(assignment),
+        "project_id": str(assignment.project.id),
+        "project_title": assignment.project.title,
+        "work_item_id": str(golden.source_work_item.id) if golden.source_work_item else str(golden.id),
+        "frame_url": frame.frame_uri,
+        "frame": {
+            "frame_number": frame.frame_number,
+            "timestamp_sec": frame.timestamp_sec,
+            "width": frame.width,
+            "height": frame.height,
+        },
+        "status": assignment.status,
+        "queue_position": None,
+        "instructions": assignment.project.instructions,
+        "label_schema": assignment.project.label_schema or [],
+        "workflow_meta": {},
+        "task_batch": {"task_batch_id": "", "items": [], "current_index": 0, "total": 0},
+        "draft": assignment.draft_annotation or {"boxes": []},
+        "pre_annotations": {},
+        "comment": assignment.comment or "",
+        "quality_signals": assignment.quality_signals or {},
+    }
+
+
+def submit_golden_annotation_assignment(
+    assignment: GoldenAnnotationAssignment,
+    label_data: dict,
+    comment: str,
+    is_final: bool,
+) -> tuple[Optional[GoldenAttempt], Optional[dict]]:
+    now = datetime.utcnow()
+    if not assignment.started_at:
+        assignment.started_at = now
+    assignment.comment = comment
+    assignment.draft_annotation = label_data
+    assignment.status = GoldenAnnotationAssignment.STATUS_SUBMITTED if is_final else GoldenAnnotationAssignment.STATUS_DRAFT
+    assignment.submitted_at = now if is_final else assignment.submitted_at
+    assignment.quality_signals = _assignment_quality_signals(assignment)
+    assignment.save()
+    if not is_final:
+        return None, None
+
+    golden = assignment.golden_frame
+    comparison = compare_bbox_annotations(golden.reference_annotation, label_data, assignment.project.iou_threshold)
+    score = float(comparison.get("quality_score", comparison.get("f1", 0.0)) or 0.0)
+    pass_threshold = max(float(assignment.project.agreement_threshold or 0.0), 0.8)
+    passed = score >= pass_threshold
+    attempt = GoldenAttempt(
+        project=assignment.project,
+        golden_frame=golden,
+        user=assignment.annotator,
+        stage=GoldenAttempt.STAGE_ANNOTATION,
+        golden_assignment=assignment,
+        submitted_annotation=label_data,
+        reference_annotation={"boxes": _normalize_boxes(golden.reference_annotation)},
+        score=round(score, 4),
+        passed=passed,
+        issue_type="annotation_control",
+    )
+    attempt.save()
+    golden.annotation_seen = int(golden.annotation_seen or 0) + 1
+    if passed:
+        golden.annotation_passed = int(golden.annotation_passed or 0) + 1
+    else:
+        golden.annotation_failed = int(golden.annotation_failed or 0) + 1
+    golden.save()
+    return attempt, {
+        "state": "golden_checked",
+        "metrics": {"quality_score": round(score, 4), "threshold": pass_threshold, "passed": passed, "comparison": comparison},
+    }
 
 
 def _run_video_qc_for_work_item(work_item: WorkItem) -> None:
@@ -2400,6 +2722,14 @@ def project_overview(project: Project) -> dict:
     intervals = list(VideoInterval.objects(project=project))
     interval_validation_assignments = list(IntervalValidationAssignment.objects(project=project))
     bbox_validation_assignments = list(BBoxValidationAssignment.objects(project=project))
+    generic_tasks = {}
+    try:
+        from apps.projects.services.generic_tasks import generic_task_summary, is_generic_task_project
+
+        if is_generic_task_project(project):
+            generic_tasks = generic_task_summary(project)
+    except Exception:
+        generic_tasks = {}
     interval_agreements = [
         float((interval.metadata or {}).get("validation_agreement") or 0.0)
         for interval in intervals
@@ -2435,7 +2765,12 @@ def project_overview(project: Project) -> dict:
             "status": project.status,
             "project_type": project.project_type,
             "annotation_type": project.annotation_type,
+            "task_type": _task_type(project),
+            "widget_type": getattr(project, "widget_type", "") or "",
+            "source_project_id": str(project.source_project.id) if getattr(project, "source_project", None) else None,
+            "source_project_title": project.source_project.title if getattr(project, "source_project", None) else "",
         },
+        "source_sync": source_sync_summary(project),
         "imports": {
             "total": len(imports),
             "draft": sum(1 for import_session in imports if import_session.status == ImportSession.STATUS_DRAFT),
@@ -2513,10 +2848,12 @@ def project_overview(project: Project) -> dict:
             "insufficient_validator_items": sum(1 for item in work_items if item.validation_status == WorkItem.VALIDATION_INSUFFICIENT_VALIDATORS),
             "average_agreement": round(sum(bbox_validation_agreements) / len(bbox_validation_agreements), 4) if bbox_validation_agreements else 0.0,
         },
+        "generic_tasks": generic_tasks,
         "golden": {
-            "active": GoldenFrame.objects(project=project, is_active=True).count(),
-            "candidates": GoldenFrame.objects(project=project, is_candidate=True, is_active=False).count(),
-            "state": "active" if GoldenFrame.objects(project=project, is_active=True).count() else "bootstrap",
+            "active": GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_ACTIVE).count(),
+            "candidates": GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_CANDIDATE).count(),
+            "retired": GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_RETIRED).count(),
+            "state": "active" if GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_ACTIVE).count() else "bootstrap",
         },
         "workflow_settings": workflow_runtime_settings(project),
         "assignments": {
@@ -2616,6 +2953,8 @@ def ensure_bbox_annotation_assignments(project: Project, max_items: int | None =
 
 
 def ensure_interval_chunk_assignments(project: Project) -> int:
+    if not _is_task(project, TASK_VIDEO_ANNOTATION):
+        return 0
     required_annotations = workflow_runtime_settings(project)["interval_annotators_per_chunk"]
     candidates = select_annotators_for_project(project, max(50, required_annotations * 3), stage="interval_annotation")
     if not candidates:
@@ -2657,12 +2996,168 @@ def ensure_interval_chunk_assignments(project: Project) -> int:
     return created
 
 
+def _set_source_sync(project: Project, *, status: str, created: int = 0, skipped: int = 0, errors: Optional[List[str]] = None, details: Optional[dict] = None) -> None:
+    source_config = getattr(project, "source_config", {}) or {}
+    source_config["materialization"] = {
+        "status": status,
+        "created": int(created or 0),
+        "skipped": int(skipped or 0),
+        "errors": errors or [],
+        "details": details or {},
+        "synced_at": datetime.utcnow().isoformat() if status in {"synced", "failed"} else "",
+    }
+    project.source_config = source_config
+    project.save()
+
+
+def source_sync_summary(project: Project) -> dict:
+    source_project = getattr(project, "source_project", None)
+    materialization = ((getattr(project, "source_config", {}) or {}).get("materialization") or {})
+    requires_source = _is_task(project, TASK_VIDEO_INTERVAL_VALIDATION, TASK_BBOX_VALIDATION)
+    return {
+        "required": requires_source,
+        "status": materialization.get("status") or ("not_synced" if requires_source else "not_required"),
+        "created": int(materialization.get("created") or 0),
+        "skipped": int(materialization.get("skipped") or 0),
+        "errors": materialization.get("errors") or [],
+        "details": materialization.get("details") or {},
+        "synced_at": materialization.get("synced_at") or "",
+        "source_project_id": str(source_project.id) if source_project else None,
+        "source_project_title": source_project.title if source_project else "",
+    }
+
+
+def materialize_interval_validation_source(project: Project) -> int:
+    source_project = getattr(project, "source_project", None)
+    if not source_project or not _is_task(project, TASK_VIDEO_INTERVAL_VALIDATION):
+        if _is_task(project, TASK_VIDEO_INTERVAL_VALIDATION):
+            _set_source_sync(project, status="failed", errors=["source_project_missing"])
+        return 0
+    source_config = getattr(project, "source_config", {}) or {}
+    statuses = source_config.get("interval_statuses") or [VideoInterval.STATUS_DRAFT]
+    created = 0
+    skipped = 0
+    errors: List[str] = []
+    for source_interval in VideoInterval.objects(project=source_project, status__in=statuses).order_by("created_at"):
+        source_id = str(source_interval.id)
+        exists = [
+            interval
+            for interval in VideoInterval.objects(project=project)
+            if (interval.metadata or {}).get("source_interval_id") == source_id
+        ]
+        if exists:
+            skipped += 1
+            continue
+        VideoInterval(
+            project=project,
+            asset=source_interval.asset,
+            start_frame=source_interval.start_frame,
+            end_frame=source_interval.end_frame,
+            start_sec=source_interval.start_sec,
+            end_sec=source_interval.end_sec,
+            status=VideoInterval.STATUS_DRAFT,
+            source=source_interval.source,
+            confidence=source_interval.confidence,
+            metadata={
+                **(source_interval.metadata or {}),
+                "source_project_id": str(source_project.id),
+                "source_interval_id": source_id,
+                "source_asset_id": str(source_interval.asset.id),
+            },
+            created_by=source_interval.created_by,
+        ).save()
+        created += 1
+    _set_source_sync(
+        project,
+        status="synced",
+        created=created,
+        skipped=skipped,
+        errors=errors,
+        details={"source_type": TASK_VIDEO_ANNOTATION, "statuses": statuses},
+    )
+    return created
+
+
+def _source_work_item_author_ids(work_item: WorkItem) -> list[str]:
+    authors = [
+        str(annotation.annotator.id)
+        for annotation in WorkAnnotation.objects(work_item=work_item, status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED])
+        if annotation.annotator
+    ]
+    return sorted(set(authors))
+
+
+def materialize_bbox_validation_source(project: Project) -> int:
+    source_project = getattr(project, "source_project", None)
+    if not source_project or not _is_task(project, TASK_BBOX_VALIDATION):
+        if _is_task(project, TASK_BBOX_VALIDATION):
+            _set_source_sync(project, status="failed", errors=["source_project_missing"])
+        return 0
+    created = 0
+    skipped = 0
+    errors: List[str] = []
+    source_items = list(
+        WorkItem.objects(
+            project=source_project,
+            status=WorkItem.STATUS_COMPLETED,
+        ).order_by("created_at")
+    )
+    for source_item in source_items:
+        boxes = _normalize_boxes(source_item.final_annotation)
+        if not boxes:
+            skipped += 1
+            continue
+        source_id = str(source_item.id)
+        exists = [
+            item
+            for item in WorkItem.objects(project=project)
+            if (item.workflow_meta or {}).get("source_work_item_id") == source_id
+        ]
+        if exists:
+            skipped += 1
+            continue
+        WorkItem(
+            project=project,
+            frame=source_item.frame,
+            status=WorkItem.STATUS_COMPLETED,
+            agreement_score=source_item.agreement_score,
+            final_annotation={"boxes": boxes},
+            final_source="source_project",
+            pre_annotations={"boxes": boxes},
+            validation_status=WorkItem.VALIDATION_PENDING,
+            workflow_meta={
+                "source_project_id": str(source_project.id),
+                "source_work_item_id": source_id,
+                "source_frame_id": str(source_item.frame.id),
+                "source_author_ids": _source_work_item_author_ids(source_item),
+                "validation_ready": True,
+            },
+        ).save()
+        created += 1
+    _set_source_sync(
+        project,
+        status="synced",
+        created=created,
+        skipped=skipped,
+        errors=errors,
+        details={"source_type": TASK_BBOX_ANNOTATION, "source_items_total": len(source_items)},
+    )
+    return created
+
+
 def sync_project_workflow(project: Project) -> dict:
     """Refresh derived workflow state for old or partially migrated projects."""
     settings = workflow_runtime_settings(project)
     recovered = _recover_stuck_assignments(project)
+    try:
+        source_intervals_created = materialize_interval_validation_source(project)
+        source_bbox_items_created = materialize_bbox_validation_source(project)
+    except Exception as exc:
+        _set_source_sync(project, status="failed", errors=[str(exc)])
+        source_intervals_created = 0
+        source_bbox_items_created = 0
     interval_annotation_created = ensure_interval_chunk_assignments(project)
-    bbox_annotation_created = ensure_bbox_annotation_assignments(project)
+    bbox_annotation_created = ensure_bbox_annotation_assignments(project) if _is_task(project, TASK_BBOX_ANNOTATION) else 0
     evaluated_items = 0
     accepted_items = 0
     requeued_or_blocked_items = 0
@@ -2680,7 +3175,7 @@ def sync_project_workflow(project: Project) -> dict:
         else:
             requeued_or_blocked_items += 1
 
-    bbox_validation_repair = repair_submitted_bbox_validation(project)
+    bbox_validation_repair = repair_submitted_bbox_validation(project) if _is_task(project, TASK_BBOX_VALIDATION) else 0
     interval_validation_created = ensure_interval_validation_assignments(
         project,
         min_validators=settings["interval_validators_per_item"],
@@ -2694,6 +3189,8 @@ def sync_project_workflow(project: Project) -> dict:
     overview = project_overview(project)
     overview["sync"] = {
         "recovered_assignments": recovered,
+        "source_intervals_created": source_intervals_created,
+        "source_bbox_items_created": source_bbox_items_created,
         "interval_annotation_created": interval_annotation_created,
         "bbox_annotation_created": bbox_annotation_created,
         "evaluated_items": evaluated_items,
@@ -2842,9 +3339,10 @@ def _quality_report(project: Project, work_items: List[WorkItem], assignments: L
             "resolved": sum(1 for review in reviews if review.status == ReviewRecord.STATUS_RESOLVED),
         },
         "golden": {
-            "active": GoldenFrame.objects(project=project, is_active=True).count(),
-            "candidates": GoldenFrame.objects(project=project, is_candidate=True, is_active=False).count(),
-            "state": "active" if GoldenFrame.objects(project=project, is_active=True).count() else "bootstrap",
+            "active": GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_ACTIVE).count(),
+            "candidates": GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_CANDIDATE).count(),
+            "retired": GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_RETIRED).count(),
+            "state": "active" if GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_ACTIVE).count() else "bootstrap",
         },
     }
 

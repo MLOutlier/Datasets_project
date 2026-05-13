@@ -116,9 +116,11 @@ export default function BBoxValidationPage() {
   const submitMutation = useMutation({
     mutationFn: async () => {
       if (!selectedAssignment) throw new Error("Validation assignment not selected");
+      const realQuestions = orderedQuestions.filter((question: any) => !question.golden_id);
+      const goldenQuestions = orderedQuestions.filter((question: any) => question.golden_id);
       const body = {
-        decisions: Object.fromEntries(orderedQuestions.map((question: any) => [question.question_id, decisions[question.question_id] ?? "approve"])),
-        golden_decisions: {},
+        decisions: Object.fromEntries(realQuestions.map((question: any) => [question.question_id, decisions[question.question_id] ?? "approve"])),
+        golden_decisions: Object.fromEntries(goldenQuestions.map((question: any) => [question.question_id, decisions[question.question_id] ?? "approve"])),
       };
       return annotatorAPI.submitBBoxValidation(selectedAssignment.assignment_id, body);
     },

@@ -238,6 +238,7 @@ class BBoxValidationAssignment(Document):
     validator = ReferenceField(User, required=True, reverse_delete_rule=CASCADE)
     work_item_ids = ListField(StringField(), default=list)  # 20 real
     golden_frame_ids = ListField(StringField(), default=list)  # 10 control
+    golden_questions = ListField(DictField(), default=list)
     decisions = DictField(default=dict)  # key: work_item_id -> approve/needs_changes
     golden_decisions = DictField(default=dict)  # key: frame_id -> approve/needs_changes
     golden_score = FloatField(default=0.0)
@@ -400,28 +401,114 @@ class ReviewRecord(Document):
 
 
 class GoldenFrame(Document):
+    STATUS_CANDIDATE = "candidate"
+    STATUS_ACTIVE = "active"
+    STATUS_RETIRED = "retired"
+
     project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
     frame = ReferenceField(FrameItem, required=True, reverse_delete_rule=CASCADE)
     reference_annotation = DictField(required=True, default=dict)
     source_work_item = ReferenceField("WorkItem", null=True, reverse_delete_rule=CASCADE)
     candidate_score = FloatField(default=0.0)
     candidate_source = StringField(default="")
+    status = StringField(
+        required=True,
+        default=STATUS_ACTIVE,
+        choices=[STATUS_CANDIDATE, STATUS_ACTIVE, STATUS_RETIRED],
+    )
     is_candidate = BooleanField(default=False)
     is_active = BooleanField(default=True)
     promoted_by = ReferenceField(User, null=True, reverse_delete_rule=CASCADE)
     promoted_at = DateTimeField(null=True)
     review_notes = StringField(default="")
+    annotation_seen = IntField(default=0)
+    annotation_passed = IntField(default=0)
+    annotation_failed = IntField(default=0)
+    validation_seen = IntField(default=0)
+    validation_passed = IntField(default=0)
+    validation_failed = IntField(default=0)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)
 
     meta = {
         "collection": "cv_golden_frames",
-        "indexes": ["project", "is_active"],
+        "indexes": ["project", "status", "is_active"],
+    }
+
+    def save(self, *args, **kwargs):
+        if self.status == self.STATUS_ACTIVE:
+            self.is_active = True
+            self.is_candidate = True
+        elif self.status == self.STATUS_CANDIDATE:
+            self.is_active = False
+            self.is_candidate = True
+        elif self.status == self.STATUS_RETIRED:
+            self.is_active = False
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class GoldenAnnotationAssignment(Document):
+    STATUS_ASSIGNED = "assigned"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_DRAFT = "draft"
+    STATUS_SUBMITTED = "submitted"
+
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    golden_frame = ReferenceField(GoldenFrame, required=True, reverse_delete_rule=CASCADE)
+    annotator = ReferenceField(User, required=True, reverse_delete_rule=CASCADE)
+    status = StringField(
+        required=True,
+        default=STATUS_ASSIGNED,
+        choices=[STATUS_ASSIGNED, STATUS_IN_PROGRESS, STATUS_DRAFT, STATUS_SUBMITTED],
+    )
+    draft_annotation = DictField(default=dict)
+    comment = StringField(default="")
+    quality_signals = DictField(default=dict)
+    started_at = DateTimeField(null=True)
+    submitted_at = DateTimeField(null=True)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "cv_golden_annotation_assignments",
+        "indexes": [
+            {"fields": ["golden_frame", "annotator"], "unique": True},
+            "project",
+            "annotator",
+            "status",
+        ],
     }
 
     def save(self, *args, **kwargs):
         self.updated_at = datetime.utcnow()
         return super().save(*args, **kwargs)
+
+
+class GoldenAttempt(Document):
+    STAGE_ANNOTATION = "annotation"
+    STAGE_VALIDATION = "validation"
+
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    golden_frame = ReferenceField(GoldenFrame, required=True, reverse_delete_rule=CASCADE)
+    user = ReferenceField(User, required=True, reverse_delete_rule=CASCADE)
+    stage = StringField(required=True, choices=[STAGE_ANNOTATION, STAGE_VALIDATION])
+    assignment = ReferenceField(Assignment, null=True, reverse_delete_rule=CASCADE)
+    validation_assignment = ReferenceField(BBoxValidationAssignment, null=True, reverse_delete_rule=CASCADE)
+    golden_assignment = ReferenceField(GoldenAnnotationAssignment, null=True, reverse_delete_rule=CASCADE)
+    submitted_annotation = DictField(default=dict)
+    decision = StringField(default="")
+    probe_annotation = DictField(default=dict)
+    reference_annotation = DictField(default=dict)
+    score = FloatField(default=0.0)
+    passed = BooleanField(default=False)
+    issue_type = StringField(default="")
+    created_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "cv_golden_attempts",
+        "indexes": ["project", "golden_frame", "user", "stage", "created_at"],
+    }
 
 
 class SecurityEvent(Document):

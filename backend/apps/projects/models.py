@@ -17,6 +17,7 @@ from mongoengine import (
 
 from ..datasets_core.models import Dataset
 from ..users.models import User
+from .task_registry import TASK_BBOX_ANNOTATION, TASK_TYPE_CHOICES, WIDGET_BBOX, WIDGET_TYPE_CHOICES
 
 
 class Project(Document):
@@ -53,6 +54,10 @@ class Project(Document):
 
     project_type = StringField(required=True, choices=[c[0] for c in TYPE_CHOICES], default=TYPE_CV)
     annotation_type = StringField(required=True, choices=[c[0] for c in ANNOTATION_CHOICES], default=ANNOTATION_BBOX)
+    task_type = StringField(required=True, choices=[c[0] for c in TASK_TYPE_CHOICES], default=TASK_BBOX_ANNOTATION)
+    widget_type = StringField(required=True, choices=[c[0] for c in WIDGET_TYPE_CHOICES], default=WIDGET_BBOX)
+    source_project = ReferenceField("self", null=True, reverse_delete_rule=CASCADE)
+    source_config = DictField(default=dict)
     instructions = StringField(default="")
     instructions_file_uri = StringField(default="")
     instructions_file_name = StringField(default="")
@@ -79,6 +84,8 @@ class Project(Document):
             "owner",
             "status",
             "project_type",
+            "task_type",
+            "widget_type",
             ("created_at", "-created_at"),
         ],
     }
@@ -148,6 +155,7 @@ class Task(Document):
     status = StringField(required=True, choices=[c[0] for c in STATUS_CHOICES], default=STATUS_PENDING)
     deadline_at = DateTimeField(null=True)
     input_ref = StringField(required=False, null=True, max_length=1024)
+    metadata = DictField(default=dict)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)
 

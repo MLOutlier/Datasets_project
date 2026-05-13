@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import csv
 import io
+import json
 import secrets
 
 from bson import ObjectId
@@ -20,7 +21,16 @@ from ..users.models import User
 from ..users.views import authenticate_from_jwt
 from .models import Project, ProjectMembership, Task
 from .serializers import ProjectSerializer, TaskSerializer
+from .services.generic_tasks import (
+    build_generic_project_export,
+    build_generic_project_export_archive,
+    create_generic_tasks_from_items,
+    generic_task_summary,
+    is_generic_task_project,
+    validate_generic_submission,
+)
 from .services.instructions_upload import InstructionUploadError, save_project_instruction
+from .task_registry import task_type_registry_payload
 
 PAGE_SIZE = 20
 
@@ -84,6 +94,13 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         serializer = ProjectSerializer(items, many=True, context={"request": request})
         return Response({"items": serializer.data, **meta}, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=["get"], url_path="task-registry")
+    def task_registry(self, request, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        return Response(task_type_registry_payload(), status=status.HTTP_200_OK)
+
     def create(self, request, *args, **kwargs) -> Response:
         user, resp = self._require_user(request)
         if resp:
@@ -93,6 +110,7 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         serializer = ProjectSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         project = serializer.create(serializer.validated_data)
+        self._sync_cv_workflow(project)
         return Response(ProjectSerializer(project, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     def retrieve(self, request, pk: str = None, *args, **kwargs) -> Response:
@@ -163,14 +181,37 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         if user.role != User.ROLE_ADMIN and str(project.owner.id) != str(user.id):
             return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
         export_format = (request.query_params.get("format") or "both").strip().lower()
-        if export_format not in {"coco", "yolo", "voc", "csv", "both"}:
-            return Response({"detail": "Invalid export format. Use coco, yolo, voc, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
+        if export_format not in {"coco", "yolo", "voc", "csv", "json", "jsonl", "both"}:
+            return Response({"detail": "Invalid export format. Use coco, yolo, voc, csv, json, jsonl or both"}, status=status.HTTP_400_BAD_REQUEST)
 
         from apps.cv_annotation.models import SecurityEvent
         from apps.cv_annotation.services.security import log_security_event
         from apps.cv_annotation.services.workflow import build_dataset_export, build_dataset_export_archive
 
         as_archive = (request.query_params.get("download") or "").strip().lower() in {"1", "true", "yes"}
+        if is_generic_task_project(project):
+            if export_format not in {"json", "jsonl", "csv", "both"}:
+                return Response({"detail": "Invalid generic export format. Use json, jsonl, csv or both"}, status=status.HTTP_400_BAD_REQUEST)
+            if as_archive:
+                archive_name, archive_bytes = build_generic_project_export_archive(project, export_format=export_format)
+                log_security_event(
+                    project=project,
+                    actor=user,
+                    event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+                    payload={"format": export_format, "archive": True, "filename": archive_name, "entrypoint": "projects", "generic": True},
+                )
+                response = HttpResponse(archive_bytes, content_type="application/zip")
+                response["Content-Disposition"] = f'attachment; filename="{archive_name}"'
+                return response
+            payload = build_generic_project_export(project, export_format=export_format)
+            log_security_event(
+                project=project,
+                actor=user,
+                event_type=SecurityEvent.EVENT_EXPORT_GENERATED,
+                payload={"format": export_format, "archive": False, "version": payload.get("export_version"), "entrypoint": "projects", "generic": True},
+            )
+            return Response(payload, status=status.HTTP_200_OK)
+
         if as_archive:
             archive_name, archive_bytes = build_dataset_export_archive(project, export_format=export_format)
             log_security_event(
@@ -247,14 +288,71 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         if not project:
             return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
         if user.role == User.ROLE_ANNOTATOR:
-            task = Task.objects(project=project, status=Task.STATUS_PENDING).filter(
-                Q(annotator=None) | Q(annotator=user)
-            ).order_by("-difficulty_score", "created_at").first()
+            task = Task.objects(project=project, annotator=user, status=Task.STATUS_IN_PROGRESS).order_by("-difficulty_score", "created_at").first()
+            if not task:
+                task = Task.objects(project=project, status=Task.STATUS_PENDING).filter(
+                    Q(annotator=None) | Q(annotator=user)
+                ).order_by("-difficulty_score", "created_at").first()
+            if task and task.status == Task.STATUS_PENDING:
+                task.annotator = user
+                task.status = Task.STATUS_IN_PROGRESS
+                task.save()
         else:
-            task = Task.objects(project=project, status=Task.STATUS_PENDING).order_by("-difficulty_score", "created_at").first()
+            task = Task.objects(project=project, status__in=[Task.STATUS_IN_PROGRESS, Task.STATUS_PENDING]).order_by("-difficulty_score", "created_at").first()
         if not task:
             return Response({"detail": "No pending tasks available"}, status=status.HTTP_404_NOT_FOUND)
         return Response(TaskSerializer(task, context={"request": request}).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get", "post"], url_path="generic-tasks")
+    def generic_tasks(self, request, pk: str = None, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        if not ObjectId.is_valid(pk):
+            return Response({"detail": "Invalid project id"}, status=status.HTTP_400_BAD_REQUEST)
+        project = Project.objects(id=ObjectId(pk)).first()
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role != User.ROLE_ADMIN and str(project.owner.id) != str(user.id):
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not is_generic_task_project(project):
+            return Response({"detail": "Generic tasks are available only for generic task types"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.method.lower() == "get":
+            tasks = list(Task.objects(project=project).order_by("-created_at").limit(100))
+            return Response(
+                {
+                    "summary": generic_task_summary(project),
+                    "items": TaskSerializer(tasks, many=True, context={"request": request}).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        items = request.data.get("items") if hasattr(request.data, "get") else None
+        if "file" in request.FILES:
+            raw_data = request.FILES["file"].read()
+            try:
+                text = raw_data.decode("utf-8-sig")
+            except Exception:
+                return Response({"detail": "CSV must be utf-8 encoded"}, status=status.HTTP_400_BAD_REQUEST)
+            reader = csv.DictReader(io.StringIO(text))
+            if reader.fieldnames:
+                items = [dict(row) for row in reader]
+            else:
+                items = [line.strip() for line in text.splitlines() if line.strip()]
+        elif isinstance(items, str):
+            stripped = items.strip()
+            if stripped.startswith("["):
+                try:
+                    items = json.loads(stripped)
+                except json.JSONDecodeError:
+                    return Response({"detail": "items must be valid JSON array or a newline list"}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                items = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if not isinstance(items, list) or not items:
+            return Response({"detail": "Provide non-empty items list or CSV file"}, status=status.HTTP_400_BAD_REQUEST)
+        result = create_generic_tasks_from_items(project, items)
+        return Response({"summary": generic_task_summary(project), **result}, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="participants/import-csv")
     def participants_import_csv(self, request, pk: str = None, *args, **kwargs) -> Response:
@@ -592,6 +690,10 @@ class TaskViewSet(JWTRequiredMixin, ViewSet):
                 {"detail": "CV projects use /api/annotator/assignments/{assignment_id}/submit/ workflow"},
                 status=status.HTTP_409_CONFLICT,
             )
+        if task.project and is_generic_task_project(task.project):
+            validation_error = validate_generic_submission(task.project, request.data.get("label_data") or {})
+            if validation_error:
+                return Response({"detail": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
         session = LabelingSession.objects(task=task, annotator=user, status=LabelingSession.STATUS_ACTIVE).first()
         if not session:
@@ -609,7 +711,9 @@ class TaskViewSet(JWTRequiredMixin, ViewSet):
 
         if annotation.is_final or annotation.status == Annotation.STATUS_PENDING_REVIEW:
             if task.status in (Task.STATUS_IN_PROGRESS, Task.STATUS_PENDING):
-                task.status = Task.STATUS_REVIEW
+                task.status = Task.STATUS_REVIEW if annotation.status == Annotation.STATUS_PENDING_REVIEW else Task.STATUS_COMPLETED
                 task.save()
+            if annotation.is_final and session:
+                session.complete()
 
         return Response(serializer.to_representation(annotation), status=status.HTTP_201_CREATED)
