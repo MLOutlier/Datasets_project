@@ -32,7 +32,19 @@ from apps.projects.models import Project, Task
 from apps.labeling.models import Annotation, LabelingSession
 from apps.quality.models import QualityMetric, QualityReview
 from apps.finance.models import Transaction, PaymentRequest
-from apps.cv_annotation.models import ImportSession, ImportAsset, FrameItem, WorkItem, Assignment, WorkAnnotation, ReviewRecord
+from apps.cv_annotation.models import (
+    BBoxValidationAssignment,
+    GoldenAnnotationAssignment,
+    GoldenAttempt,
+    GoldenFrame,
+    ImportSession,
+    ImportAsset,
+    FrameItem,
+    WorkItem,
+    Assignment,
+    WorkAnnotation,
+    ReviewRecord,
+)
 
 
 # =============================================================================
@@ -105,7 +117,17 @@ def _cleanup_database():
         Annotation, LabelingSession,
         QualityMetric, QualityReview,
         Transaction, PaymentRequest,
-        ImportSession, ImportAsset, FrameItem, WorkItem, Assignment, WorkAnnotation, ReviewRecord,
+        ImportSession,
+        ImportAsset,
+        FrameItem,
+        WorkItem,
+        Assignment,
+        WorkAnnotation,
+        ReviewRecord,
+        BBoxValidationAssignment,
+        GoldenFrame,
+        GoldenAnnotationAssignment,
+        GoldenAttempt,
     ]
     for model in collections:
         try:

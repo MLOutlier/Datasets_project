@@ -4,14 +4,19 @@ import { useQuery } from "@tanstack/react-query";
 import { annotatorAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
+import { getTaskGroupLabel } from "../lib/taskFlowCopy";
 
 type ProjectTab = "available" | "active" | "completed";
 
 const stageTitles: Record<string, string> = {
-  interval_annotation: "Разметка интервалов",
-  interval_validation: "Валидация интервалов",
+  video_annotation: "Разметка видео",
+  video_interval_validation: "Валидация интервалов",
   bbox_annotation: "Разметка объектов",
   bbox_validation: "Валидация объектов",
+  text_annotation: "Текстовая разметка",
+  image_annotation: "Разметка изображений",
+  classification: "Классификация",
+  comparison: "Сравнение",
 };
 
 function stageTitle(project: any) {
@@ -47,7 +52,7 @@ export function LabelingPage() {
       <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Проекты для разметки</h1>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-          Каждый этап показан отдельной карточкой, но связан с исходным проектом заказчика.
+          Каждый проект здесь является самостоятельным типом задания со своим виджетом и очередью.
         </p>
       </div>
 
@@ -115,8 +120,10 @@ export function LabelingPage() {
               <div key={project.stage_project_id ?? `${project.project_id}:${project.stage ?? "parent"}`} className="card space-y-4">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                      {project.project_status} · часть проекта {project.linked_project_title ?? project.project_title}
+                    <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                      <span>{project.project_status}</span>
+                      <span>· {getTaskGroupLabel(project.task_type || project.stage)}</span>
+                      <span>· {project.widget_type ?? "widget"}</span>
                     </div>
                     <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-white">{stageTitle(project)}</h2>
                   </div>

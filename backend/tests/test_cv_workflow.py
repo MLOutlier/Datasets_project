@@ -2,7 +2,26 @@ import io
 import pytest
 from PIL import Image
 
-from apps.cv_annotation.models import Assignment, ReviewRecord, WorkAnnotation, WorkItem
+from apps.cv_annotation.models import (
+    Assignment,
+    BBoxValidationAssignment,
+    FrameItem,
+    GoldenAnnotationAssignment,
+    GoldenAttempt,
+    GoldenFrame,
+    ImportAsset,
+    ImportSession,
+    ReviewRecord,
+    WorkAnnotation,
+    WorkItem,
+)
+from apps.cv_annotation.services.workflow import (
+    _build_golden_validation_question,
+    compare_bbox_annotations,
+    maybe_create_hidden_golden_assignment,
+    submit_bbox_validation_assignment,
+    submit_golden_annotation_assignment,
+)
 from apps.projects.models import Project, ProjectMembership
 from apps.users.serializers import create_access_token
 
@@ -14,6 +33,210 @@ def make_test_image(name: str = "frame.png"):
     buffer.seek(0)
     buffer.name = name
     return buffer
+
+
+def make_cv_project(owner, annotators=None, reviewers=None, participant_rules=None):
+    project = Project(
+        owner=owner,
+        title="Golden project",
+        project_type=Project.TYPE_CV,
+        annotation_type=Project.ANNOTATION_BBOX,
+        instructions="Draw every object",
+        label_schema=[{"name": "drone"}, {"name": "car"}],
+        allowed_annotators=annotators or [],
+        allowed_reviewers=reviewers or [],
+        assignments_per_task=1,
+        agreement_threshold=0.75,
+        iou_threshold=0.5,
+        participant_rules=participant_rules or {},
+    )
+    project.save()
+    return project
+
+
+def make_cv_frame(project, owner, frame_number=1):
+    import_session = ImportSession(project=project, created_by=owner, status=ImportSession.STATUS_FINALIZED)
+    import_session.save()
+    asset = ImportAsset(
+        import_session=import_session,
+        project=project,
+        file_uri=f"/media/test-{frame_number}.png",
+        file_name=f"test-{frame_number}.png",
+        file_size=128,
+        mime_type="image/png",
+        asset_type=ImportAsset.TYPE_IMAGE,
+        processing_status=ImportAsset.STATUS_PROCESSED,
+    )
+    asset.save()
+    frame = FrameItem(
+        project=project,
+        asset=asset,
+        frame_uri=asset.file_uri,
+        frame_number=frame_number,
+        width=128,
+        height=96,
+    )
+    frame.save()
+    return frame
+
+
+@pytest.mark.django_db
+class TestGoldenDatasetWorkflow:
+    def test_validation_probe_generation_sets_expected_decisions_and_breaks_geometry(self, user_customer):
+        project = make_cv_project(user_customer)
+        frame = make_cv_frame(project, user_customer)
+        reference = {"boxes": [{"x": 10, "y": 10, "width": 24, "height": 18, "label": "drone"}]}
+        golden = GoldenFrame(
+            project=project,
+            frame=frame,
+            reference_annotation=reference,
+            status=GoldenFrame.STATUS_ACTIVE,
+        ).save()
+
+        seen = {}
+        for index in range(250):
+            question = _build_golden_validation_question(golden, seed=f"seed-{index}")
+            seen.setdefault(question["issue_type"], question)
+            if {"correct", "missing_box", "bad_geometry", "wrong_label", "extra_box"}.issubset(seen.keys()):
+                break
+
+        assert seen["correct"]["expected_decision"] == "approve"
+        assert seen["correct"]["probe_annotation"] == reference
+        for issue_type in ["missing_box", "bad_geometry", "wrong_label", "extra_box"]:
+            assert seen[issue_type]["expected_decision"] == "needs_changes"
+
+        geometry_score = compare_bbox_annotations(
+            reference,
+            seen["bad_geometry"]["probe_annotation"],
+            project.iou_threshold,
+        )
+        assert geometry_score["tp"] == 0
+        assert geometry_score["average_iou"] < project.iou_threshold
+
+    def test_validation_golden_score_uses_stored_expected_decision(self, user_customer, user_annotator):
+        project = make_cv_project(user_customer, annotators=[user_annotator])
+        frame = make_cv_frame(project, user_customer)
+        reference = {"boxes": [{"x": 10, "y": 10, "width": 24, "height": 18, "label": "drone"}]}
+        golden = GoldenFrame(
+            project=project,
+            frame=frame,
+            reference_annotation=reference,
+            status=GoldenFrame.STATUS_ACTIVE,
+        ).save()
+        assignment = BBoxValidationAssignment(
+            project=project,
+            validator=user_annotator,
+            work_item_ids=[],
+            golden_frame_ids=[str(golden.id)],
+            golden_questions=[
+                {
+                    "golden_id": str(golden.id),
+                    "probe_annotation": reference,
+                    "expected_decision": "needs_changes",
+                    "issue_type": "stored_probe_expectation",
+                }
+            ],
+        ).save()
+
+        result = submit_bbox_validation_assignment(
+            assignment,
+            decisions={},
+            golden_decisions={str(golden.id): "approve"},
+            min_score=0.8,
+            min_validators=1,
+        )
+
+        assert result["status"] == "rejected_by_golden"
+        assert result["golden_score"] == 0.0
+        attempt = GoldenAttempt.objects.get(golden_frame=golden, user=user_annotator, stage=GoldenAttempt.STAGE_VALIDATION)
+        assert attempt.passed is False
+        assert attempt.issue_type == "stored_probe_expectation"
+        golden.reload()
+        assert golden.validation_seen == 1
+        assert golden.validation_failed == 1
+
+    def test_hidden_annotation_golden_creates_attempt_without_work_annotation(self, user_customer, user_annotator):
+        project = make_cv_project(
+            user_customer,
+            annotators=[user_annotator],
+            participant_rules={"annotation_golden_interval": 1},
+        )
+        frame = make_cv_frame(project, user_customer)
+        reference = {"boxes": [{"x": 12, "y": 14, "width": 25, "height": 16, "label": "drone"}]}
+        source_item = WorkItem(
+            project=project,
+            frame=frame,
+            status=WorkItem.STATUS_COMPLETED,
+            final_annotation=reference,
+            validation_status=WorkItem.VALIDATION_APPROVED,
+        ).save()
+        golden = GoldenFrame(
+            project=project,
+            frame=frame,
+            reference_annotation=reference,
+            source_work_item=source_item,
+            status=GoldenFrame.STATUS_ACTIVE,
+        ).save()
+        ordinary_assignment = Assignment(
+            project=project,
+            work_item=source_item,
+            annotator=user_annotator,
+            status=Assignment.STATUS_SUBMITTED,
+        ).save()
+
+        hidden_assignment = maybe_create_hidden_golden_assignment(project, user_annotator)
+        assert hidden_assignment is not None
+        assert hidden_assignment.golden_frame == golden
+
+        attempt, evaluation = submit_golden_annotation_assignment(
+            hidden_assignment,
+            reference,
+            comment="",
+            is_final=True,
+        )
+
+        assert attempt is not None
+        assert attempt.passed is True
+        assert evaluation["state"] == "golden_checked"
+        assert WorkAnnotation.objects(assignment=ordinary_assignment).count() == 0
+        assert WorkAnnotation.objects.count() == 0
+        assert GoldenAnnotationAssignment.objects(id=hidden_assignment.id).first().status == GoldenAnnotationAssignment.STATUS_SUBMITTED
+        golden.reload()
+        assert golden.annotation_seen == 1
+        assert golden.annotation_passed == 1
+
+    def test_customer_can_promote_and_retire_golden_frame(self, client, auth_headers, user_customer):
+        project = make_cv_project(user_customer)
+        frame = make_cv_frame(project, user_customer)
+        golden = GoldenFrame(
+            project=project,
+            frame=frame,
+            reference_annotation={"boxes": [{"x": 10, "y": 10, "width": 20, "height": 20, "label": "drone"}]},
+            status=GoldenFrame.STATUS_CANDIDATE,
+        ).save()
+
+        list_response = client.get(f"/api/projects/{project.id}/golden-candidates/", **auth_headers)
+        assert list_response.status_code == 200
+        assert list_response.data["candidate_count"] == 1
+        assert list_response.data["active_count"] == 0
+
+        promote_response = client.post(
+            f"/api/projects/{project.id}/golden-candidates/{golden.id}/promote/",
+            {"review_notes": "good control frame"},
+            **auth_headers,
+            format="json",
+        )
+        assert promote_response.status_code == 200
+        assert promote_response.data["status"] == GoldenFrame.STATUS_ACTIVE
+
+        retire_response = client.post(
+            f"/api/projects/{project.id}/golden-candidates/{golden.id}/retire/",
+            {"review_notes": "outdated"},
+            **auth_headers,
+            format="json",
+        )
+        assert retire_response.status_code == 200
+        assert retire_response.data["status"] == GoldenFrame.STATUS_RETIRED
 
 
 @pytest.mark.django_db

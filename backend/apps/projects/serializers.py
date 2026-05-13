@@ -8,6 +8,14 @@ from rest_framework import serializers
 from ..datasets_core.models import Dataset
 from ..users.models import User
 from .models import Project, ProjectMembership, Task
+from .task_registry import (
+    TASK_TYPE_CHOICES,
+    WIDGET_TYPE_CHOICES,
+    annotation_type_for_task,
+    default_widget_for_task,
+    is_widget_allowed,
+    task_requires_source_project,
+)
 
 
 class ProjectSerializer(serializers.Serializer):
@@ -20,6 +28,10 @@ class ProjectSerializer(serializers.Serializer):
 
     project_type = serializers.ChoiceField(choices=[c[0] for c in Project.TYPE_CHOICES], default=Project.TYPE_CV)
     annotation_type = serializers.ChoiceField(choices=[c[0] for c in Project.ANNOTATION_CHOICES], default=Project.ANNOTATION_BBOX)
+    task_type = serializers.ChoiceField(choices=[c[0] for c in TASK_TYPE_CHOICES], default=Project._fields["task_type"].default)
+    widget_type = serializers.ChoiceField(choices=[c[0] for c in WIDGET_TYPE_CHOICES], required=False)
+    source_project_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    source_config = serializers.DictField(required=False, default=dict)
     instructions = serializers.CharField(required=False, allow_blank=True, default="")
     instructions_file_uri = serializers.CharField(read_only=True)
     instructions_file_name = serializers.CharField(read_only=True)
@@ -149,6 +161,40 @@ class ProjectSerializer(serializers.Serializer):
 
         return normalized
 
+    def validate(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        task_type = attrs.get("task_type") or Project._fields["task_type"].default
+        widget_type = attrs.get("widget_type")
+        if not widget_type or "widget_type" not in getattr(self, "initial_data", {}):
+            widget_type = default_widget_for_task(task_type)
+            attrs["widget_type"] = widget_type
+        if not is_widget_allowed(task_type, widget_type):
+            raise serializers.ValidationError({"widget_type": f"Widget '{widget_type}' is not compatible with task type '{task_type}'."})
+
+        attrs["annotation_type"] = annotation_type_for_task(task_type)
+        attrs["project_type"] = Project.TYPE_CV if attrs["annotation_type"] == Project.ANNOTATION_BBOX else Project.TYPE_STANDARD
+
+        source_project_id = attrs.pop("source_project_id", None)
+        source_project = None
+        if source_project_id:
+            if not ObjectId.is_valid(str(source_project_id)):
+                raise serializers.ValidationError({"source_project_id": "Invalid source project id."})
+            source_project = Project.objects(id=ObjectId(str(source_project_id))).first()
+            if not source_project:
+                raise serializers.ValidationError({"source_project_id": "Source project not found."})
+            if user and user.role != User.ROLE_ADMIN and str(source_project.owner.id) != str(user.id):
+                raise serializers.ValidationError({"source_project_id": "Source project is not available."})
+            source_task_type = getattr(source_project, "task_type", "bbox_annotation") or "bbox_annotation"
+            if task_type == "video_interval_validation" and source_task_type != "video_annotation":
+                raise serializers.ValidationError({"source_project_id": "Interval validation requires a video annotation source project."})
+            if task_type == "bbox_validation" and source_task_type != "bbox_annotation":
+                raise serializers.ValidationError({"source_project_id": "BBox validation requires a bbox annotation source project."})
+        if task_requires_source_project(task_type) and not source_project:
+            raise serializers.ValidationError({"source_project_id": "This task type requires a source project."})
+        attrs["_source_project"] = source_project
+        return attrs
+
     def _resolve_users(self, ids: List[str], role: str) -> List[User]:
         users: List[User] = []
         seen = set()
@@ -169,11 +215,12 @@ class ProjectSerializer(serializers.Serializer):
 
         annotator_ids = validated_data.pop("allowed_annotator_ids", [])
         reviewer_ids = validated_data.pop("allowed_reviewer_ids", [])
+        source_project = validated_data.pop("_source_project", None)
 
         annotators = self._resolve_users(annotator_ids, User.ROLE_ANNOTATOR)
         reviewers = self._resolve_users(reviewer_ids, User.ROLE_REVIEWER)
 
-        project = Project(owner=user, allowed_annotators=annotators, allowed_reviewers=reviewers, **validated_data)
+        project = Project(owner=user, allowed_annotators=annotators, allowed_reviewers=reviewers, source_project=source_project, **validated_data)
         project.save()
 
         self._sync_memberships(project, annotators, reviewers)
@@ -182,6 +229,7 @@ class ProjectSerializer(serializers.Serializer):
     def update(self, instance: Project, validated_data: Dict[str, Any]) -> Project:
         annotator_ids = validated_data.pop("allowed_annotator_ids", None)
         reviewer_ids = validated_data.pop("allowed_reviewer_ids", None)
+        source_project = validated_data.pop("_source_project", None)
 
         for field in (
             "title",
@@ -189,6 +237,9 @@ class ProjectSerializer(serializers.Serializer):
             "status",
             "project_type",
             "annotation_type",
+            "task_type",
+            "widget_type",
+            "source_config",
             "instructions",
             "label_schema",
             "participant_rules",
@@ -199,6 +250,8 @@ class ProjectSerializer(serializers.Serializer):
         ):
             if field in validated_data:
                 setattr(instance, field, validated_data[field])
+        if "source_project_id" in getattr(self, "initial_data", {}) or source_project is not None:
+            instance.source_project = source_project
 
         annotators = instance.allowed_annotators
         reviewers = instance.allowed_reviewers
@@ -255,6 +308,11 @@ class ProjectSerializer(serializers.Serializer):
             "status": instance.status,
             "project_type": instance.project_type,
             "annotation_type": instance.annotation_type,
+            "task_type": getattr(instance, "task_type", "bbox_annotation") or "bbox_annotation",
+            "widget_type": getattr(instance, "widget_type", "bbox") or "bbox",
+            "source_project_id": str(instance.source_project.id) if getattr(instance, "source_project", None) else None,
+            "source_project_title": instance.source_project.title if getattr(instance, "source_project", None) else "",
+            "source_config": getattr(instance, "source_config", {}) or {},
             "instructions": instance.instructions,
             "instructions_file_uri": getattr(instance, "instructions_file_uri", "") or "",
             "instructions_file_name": getattr(instance, "instructions_file_name", "") or "",
@@ -293,6 +351,7 @@ class TaskSerializer(serializers.Serializer):
     difficulty_score = serializers.FloatField(required=False, default=0.5, min_value=0)
     deadline_at = serializers.DateTimeField(required=False, allow_null=True)
     input_ref = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    metadata = serializers.DictField(required=False, default=dict)
 
     created_at = serializers.DateTimeField(read_only=True)
     updated_at = serializers.DateTimeField(read_only=True)
@@ -348,12 +407,13 @@ class TaskSerializer(serializers.Serializer):
             difficulty_score=validated_data.get("difficulty_score", 0.5),
             deadline_at=validated_data.get("deadline_at"),
             input_ref=validated_data.get("input_ref"),
+            metadata=validated_data.get("metadata") or {},
         )
         task.save()
         return task
 
     def update(self, instance: Task, validated_data: Dict[str, Any]) -> Task:
-        for field in ("status", "difficulty_score", "deadline_at", "input_ref"):
+        for field in ("status", "difficulty_score", "deadline_at", "input_ref", "metadata"):
             if field in validated_data:
                 setattr(instance, field, validated_data[field])
         if "annotator_id" in validated_data:
@@ -377,6 +437,7 @@ class TaskSerializer(serializers.Serializer):
             "difficulty_score": instance.difficulty_score,
             "deadline_at": instance.deadline_at,
             "input_ref": instance.input_ref,
+            "metadata": getattr(instance, "metadata", {}) or {},
             "frame_url": instance.input_ref,
             "created_at": instance.created_at,
             "updated_at": instance.updated_at,

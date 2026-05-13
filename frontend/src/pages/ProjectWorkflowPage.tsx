@@ -67,6 +67,7 @@ function normalizeParticipantRules(rules?: ProjectParticipantRules): Required<Pr
     golden_min_score: Number(rules?.golden_min_score ?? 0.8),
     golden_candidate_threshold: Number(rules?.golden_candidate_threshold ?? 0.9),
     golden_promotion_target: Number(rules?.golden_promotion_target ?? 10),
+    annotation_golden_interval: Number(rules?.annotation_golden_interval ?? 9),
     interval_review_padding_sec: Number(rules?.interval_review_padding_sec ?? 3),
     stuck_assignment_ttl_minutes: Number(rules?.stuck_assignment_ttl_minutes ?? 30),
   };
@@ -221,6 +222,7 @@ export default function ProjectWorkflowPage() {
           min_sequence_size: Number(minSequenceSize) || 3,
           golden_candidate_threshold: 0.9,
           golden_promotion_target: 10,
+          annotation_golden_interval: 9,
           interval_review_padding_sec: 3,
           stuck_assignment_ttl_minutes: 30,
         },

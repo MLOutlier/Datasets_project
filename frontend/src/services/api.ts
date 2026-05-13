@@ -1,4 +1,4 @@
-import axios, { AxiosError, AxiosInstance, AxiosRequestConfig, isAxiosError } from "axios";
+import axios, { AxiosError, AxiosInstance, isAxiosError } from "axios";
 import {
   AnnotateRequest,
   AnnotatorProjectDetail,
@@ -22,16 +22,17 @@ import {
   ProjectFinalizeResponse,
   ProjectImportResponse,
   ProjectOverview,
-  QualityMetricsItem,
   LeaderboardResponse,
   LeaderboardEntry,
+  QualityMetricsItem,
   QualityReviewRequest,
   QualityReviewResponse,
   QueueItem,
-  RatingHistoryItem,
   RegisterRequest,
+  RatingHistoryItem,
   SecurityEventItem,
   Task,
+  TaskRegistryResponse,
   Transaction,
   TransferRequest,
   User,
@@ -68,6 +69,8 @@ export function setTokens(accessToken: string, refreshToken?: string | null) {
     localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
     if (refreshToken) {
       localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+    } else {
+      localStorage.removeItem(REFRESH_TOKEN_KEY);
     }
   } catch {
     // ignore
@@ -94,32 +97,6 @@ export const api: AxiosInstance = axios.create({
   timeout: 30000,
 });
 
-const refreshClient: AxiosInstance = axios.create({
-  baseURL: apiBaseUrl,
-  timeout: 30000,
-});
-
-type RetriableConfig = AxiosRequestConfig & { _retry?: boolean };
-
-async function refreshAccessToken(): Promise<string | null> {
-  const refreshToken = getRefreshToken();
-  const payload = refreshToken ? { refresh: refreshToken } : {};
-  try {
-    const res = await refreshClient.post<AuthResponse>("/api/auth/token/refresh/", payload, {
-      headers: { "Content-Type": "application/json" },
-    });
-    const access = res.data.access;
-    const nextRefresh = res.data.refresh;
-    if (access) {
-      setTokens(access, nextRefresh ?? refreshToken);
-      return access;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 api.interceptors.request.use((config) => {
   console.log('🔵 Axios Request:', config.method?.toUpperCase(), config.url);
   const token = getAccessToken();
@@ -135,20 +112,17 @@ api.interceptors.response.use(
     console.log('🟢 Axios Response:', response.config.method?.toUpperCase(), response.config.url, response.status);
     return response;
   },
-  async (error: AxiosError<ApiErrorResponse>) => {
+  (error: AxiosError<ApiErrorResponse>) => {
     console.log('🔴 Axios Error:', error.config?.method?.toUpperCase(), error.config?.url, error.response?.status);
     if (!isAxiosError(error)) return Promise.reject(error);
     const { response, config } = error;
     if (!response || !config) return Promise.reject(error);
     const status = response.status;
-    const retriableConfig = config as RetriableConfig;
-    if (status === 401 && !retriableConfig._retry) {
-      retriableConfig._retry = true;
-      const nextAccess = await refreshAccessToken();
-      if (nextAccess) {
-        retriableConfig.headers = retriableConfig.headers ?? {};
-        retriableConfig.headers.Authorization = `Bearer ${nextAccess}`;
-        return api.request(retriableConfig);
+    if (status === 401) {
+      const requestUrl = String(config.url || "");
+      const isAuthEndpoint = requestUrl.includes("/api/auth/login/") || requestUrl.includes("/api/auth/register/");
+      if (!isAuthEndpoint) {
+        clearTokens();
       }
     }
     return Promise.reject(error);
@@ -201,6 +175,10 @@ export const projectsAPI = {
     const res = await api.get<ApiListResponse<Project>>("/api/projects/", { params });
     return res.data;
   },
+  async taskRegistry(): Promise<TaskRegistryResponse> {
+    const res = await api.get<TaskRegistryResponse>("/api/projects/task-registry/");
+    return res.data;
+  },
   async get(id: string): Promise<Project> {
     const res = await api.get<Project>(`/api/projects/${id}/`);
     return res.data;
@@ -235,9 +213,27 @@ export const projectsAPI = {
     });
     return res.data;
   },
+  async nextTask(projectId: string): Promise<Task> {
+    const res = await api.get<Task>(`/api/projects/${projectId}/tasks/next/`);
+    return res.data;
+  },
+  async genericTasks(projectId: string): Promise<{ summary: Record<string, number>; items: Task[] }> {
+    const res = await api.get<{ summary: Record<string, number>; items: Task[] }>(`/api/projects/${projectId}/generic-tasks/`);
+    return res.data;
+  },
+  async createGenericTasks(projectId: string, body: FormData | { items: unknown[] | string }): Promise<{ summary: Record<string, number>; created: number; skipped: number; total: number; dataset_id: string }> {
+    if (body instanceof FormData) {
+      const res = await api.post<{ summary: Record<string, number>; created: number; skipped: number; total: number; dataset_id: string }>(`/api/projects/${projectId}/generic-tasks/`, body, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      return res.data;
+    }
+    const res = await api.post<{ summary: Record<string, number>; created: number; skipped: number; total: number; dataset_id: string }>(`/api/projects/${projectId}/generic-tasks/`, body);
+    return res.data;
+  },
   async exportDataset(projectId: string, format: "voc" | "coco" | "yolo" | "tfrecord" = "coco"): Promise<Blob> {
     const res = await api.get(`/api/projects/${projectId}/export/`, {
-      params: { format },
+      params: { format, download: "1" },
       responseType: "blob",
     });
     return res.data as Blob;
@@ -269,13 +265,13 @@ export const workflowAPI = {
     const res = await api.post<ProjectOverview>(`/api/projects/${projectId}/workflow/sync/`, {});
     return res.data;
   },
-  async export(projectId: string, format: "voc" | "coco" | "yolo" | "tfrecord" = "coco"): Promise<ProjectExportPayload> {
+  async export(projectId: string, format: "coco" | "yolo" | "voc" | "tfrecord" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<ProjectExportPayload> {
     const res = await api.get<ProjectExportPayload>(`/api/cv/projects/${projectId}/export/`, { params: { format } });
     return res.data;
   },
-  async exportArchive(projectId: string, format: "voc" | "coco" | "yolo" | "tfrecord" = "coco"): Promise<Blob> {
+  async exportArchive(projectId: string, format: "coco" | "yolo" | "voc" | "tfrecord" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<Blob> {
     const res = await api.get(`/api/cv/projects/${projectId}/export/`, {
-      params: { format },
+      params: { format, download: "1" },
       responseType: "blob",
     });
     return res.data as Blob;
@@ -290,6 +286,12 @@ export const workflowAPI = {
   },
   async promoteGoldenCandidate(projectId: string, goldenFrameId: string, reviewNotes?: string): Promise<any> {
     const res = await api.post(`/api/projects/${projectId}/golden-candidates/${goldenFrameId}/promote/`, {
+      review_notes: reviewNotes || "",
+    });
+    return res.data;
+  },
+  async retireGoldenCandidate(projectId: string, goldenFrameId: string, reviewNotes?: string): Promise<any> {
+    const res = await api.post(`/api/projects/${projectId}/golden-candidates/${goldenFrameId}/retire/`, {
       review_notes: reviewNotes || "",
     });
     return res.data;
