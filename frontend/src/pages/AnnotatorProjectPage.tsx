@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { annotatorAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
+import { getTaskFlowCopy, getTaskGroupLabel } from "../lib/taskFlowCopy";
 
 export default function AnnotatorProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -52,6 +53,8 @@ export default function AnnotatorProjectPage() {
 
   const project = projectQuery.data;
   const taskType = String(project.task_type || "bbox_annotation");
+  const taskCopy = getTaskFlowCopy(taskType);
+  const taskGroupLabel = getTaskGroupLabel(taskType);
   const primaryActionLabel = project.active_assignment_id ? "Продолжить разметку" : project.next_assignment_id ? "Начать разметку" : "Нет доступных заданий";
   const intervalChunkCount = (intervalChunkQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
   const intervalValidationCount = (intervalValidationQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
@@ -68,6 +71,12 @@ export default function AnnotatorProjectPage() {
         <Link to="/labeling" className="btn-secondary">
           К проектам
         </Link>
+      </div>
+
+      <div className={`rounded-lg border p-4 ${taskCopy.group === "video" ? "border-blue-200 bg-blue-50 text-blue-950 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100" : "border-gray-200 bg-gray-50 text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"}`}>
+        <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{taskGroupLabel}</div>
+        <div className="mt-1 text-lg font-semibold">{taskCopy.projectTitle}</div>
+        <div className="mt-2 text-sm opacity-90">{taskCopy.projectDescription}</div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
@@ -117,16 +126,18 @@ export default function AnnotatorProjectPage() {
         </div>
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {taskType === "video_annotation" ? (
-            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=intervals`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300 dark:border-gray-800 dark:hover:border-blue-700">
+            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=intervals`} className="rounded-lg border border-blue-200 bg-blue-50 p-4 transition hover:border-blue-300 dark:border-blue-900 dark:bg-blue-950 dark:hover:border-blue-700">
               <div className="text-sm text-gray-500 dark:text-gray-400">Виджет</div>
               <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Интервалы видео</div>
+              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{taskCopy.annotatorDescription}</div>
               <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{intervalChunkCount}</div>
             </Link>
           ) : null}
           {taskType === "video_interval_validation" ? (
-            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=interval-validation`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300 dark:border-gray-800 dark:hover:border-blue-700">
+            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=interval-validation`} className="rounded-lg border border-blue-200 bg-blue-50 p-4 transition hover:border-blue-300 dark:border-blue-900 dark:bg-blue-950 dark:hover:border-blue-700">
               <div className="text-sm text-gray-500 dark:text-gray-400">Виджет</div>
               <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Валидация интервалов</div>
+              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{taskCopy.annotatorDescription}</div>
               <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{intervalValidationCount}</div>
             </Link>
           ) : null}

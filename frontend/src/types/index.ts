@@ -455,6 +455,57 @@ export interface QueueItem {
   created_at: string;
 }
 
+export interface IntervalQueueItem {
+  assignment_id: string;
+  task_id: string;
+  project_id: string;
+  project_title: string;
+  asset_id: string;
+  asset_uri: string;
+  start_frame: number;
+  end_frame: number;
+  duration_sec?: number;
+  frame_interval_sec: number;
+  status: string;
+  label_schema?: ProjectLabel[];
+  preview_frame_uris?: string[];
+  thumbnail_urls?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface IntervalValidationQueueItem {
+  assignment_id: string;
+  interval_id: string;
+  project_id: string;
+  project_title: string;
+  asset_id: string;
+  asset_uri: string;
+  clip?: {
+    clip_uri?: string;
+    uri?: string;
+    start_sec?: number;
+    duration_sec?: number;
+  };
+  start_frame: number;
+  end_frame: number;
+  start_sec: number;
+  end_sec: number;
+  duration_sec?: number;
+  frame_interval_sec: number;
+  status: string;
+}
+
+export interface BBoxValidationQueueItem {
+  assignment_id: string;
+  project_id: string;
+  project_title: string;
+  total: number;
+  sequence?: Array<{ id: string }>;
+  questions?: Array<Record<string, unknown>>;
+  question_details?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
 export interface AnnotatorProjectSummary {
   stage_project_id?: string;
   parent_project_id?: string;

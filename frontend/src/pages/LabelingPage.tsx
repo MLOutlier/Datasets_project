@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { annotatorAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
+import { getTaskGroupLabel } from "../lib/taskFlowCopy";
 
 type ProjectTab = "available" | "active" | "completed";
 
@@ -119,8 +120,10 @@ export function LabelingPage() {
               <div key={project.stage_project_id ?? `${project.project_id}:${project.stage ?? "parent"}`} className="card space-y-4">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                      {project.project_status} · {project.widget_type ?? "widget"}
+                    <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                      <span>{project.project_status}</span>
+                      <span>· {getTaskGroupLabel(project.task_type || project.stage)}</span>
+                      <span>· {project.widget_type ?? "widget"}</span>
                     </div>
                     <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-white">{stageTitle(project)}</h2>
                   </div>

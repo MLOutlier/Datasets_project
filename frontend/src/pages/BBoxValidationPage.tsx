@@ -72,6 +72,7 @@ export default function BBoxValidationPage() {
   const [zoom, setZoom] = useState(1);
   const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 });
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [statusNotice, setStatusNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
   const queueQuery = useQuery({
     queryKey: ["bbox-validation-queue"],
@@ -104,6 +105,12 @@ export default function BBoxValidationPage() {
   const allAnswered = orderedQuestions.length > 0 && orderedQuestions.every((question: any) => Boolean(decisions[question.question_id]));
 
   useEffect(() => {
+    if (!statusNotice) return;
+    const timeout = window.setTimeout(() => setStatusNotice(null), 6000);
+    return () => window.clearTimeout(timeout);
+  }, [statusNotice]);
+
+  useEffect(() => {
     if (!selectedAssignmentId && selectedAssignment?.assignment_id) {
       setSelectedAssignmentId(selectedAssignment.assignment_id);
       setCurrentIndex(0);
@@ -124,14 +131,24 @@ export default function BBoxValidationPage() {
       };
       return annotatorAPI.submitBBoxValidation(selectedAssignment.assignment_id, body);
     },
-    onSuccess: async () => {
+    onSuccess: async (result: any) => {
       setSelectedAssignmentId(null);
       setDecisions({});
       setZoom(1);
       setZoomOrigin({ x: 50, y: 50 });
       setCurrentIndex(0);
+      setStatusNotice({
+        kind: "success",
+        text: `Проверка отправлена. ${Number(result?.approved_items || 0)} элементов подтверждено, ${Number(result?.requeued_items || 0)} отправлено на доразметку.`,
+      });
       await queryClient.invalidateQueries({ queryKey: ["bbox-validation-queue"] });
       await queryClient.invalidateQueries({ queryKey: ["annotator-projects"] });
+    },
+    onError: (err: any) => {
+      setStatusNotice({
+        kind: "error",
+        text: err?.response?.data?.detail || err?.response?.data?.error || err?.message || "Не удалось отправить валидацию.",
+      });
     },
   });
 
@@ -186,6 +203,22 @@ export default function BBoxValidationPage() {
             </Link>
           </div>
         </div>
+      </div>
+
+      {statusNotice ? (
+        <div
+          className={`rounded-lg border p-3 text-sm ${
+            statusNotice.kind === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100"
+              : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-100"
+          }`}
+        >
+          {statusNotice.text}
+        </div>
+      ) : null}
+
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
+        Эта страница работает с очередью уже размеченных work items. Загрузка изображений сюда не нужна, сначала должен появиться source-проект и синхронизированная очередь.
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(220px,320px),minmax(0,1fr)]">

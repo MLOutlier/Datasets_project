@@ -2,12 +2,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { annotatorAPI } from "../services/api";
+import { VideoJsPlayer } from "../components/VideoJsPlayer";
+import type { IntervalQueueItem, IntervalValidationQueueItem } from "../types";
 
 type IntervalDraft = {
   start_frame: number;
   end_frame: number;
   confidence?: number;
   label?: string;
+};
+
+type DraftSnapshot = {
+  intervals: IntervalDraft[];
+  comment: string;
+  intervalStartFrame: number | null;
 };
 
 function clampFrame(value: number, start: number, end: number) {
@@ -19,15 +27,112 @@ function frameToTime(frame: number, intervalSec: number) {
 }
 
 function formatSeconds(value: number) {
-  if (!Number.isFinite(value)) return "0.0 c";
-  return `${value.toFixed(1)} c`;
+  if (!Number.isFinite(value)) return "0.0 с";
+  return `${value.toFixed(1)} с`;
 }
 
-function chunkDuration(item: any) {
-  const provided = Number(item?.duration_sec);
+function frameDuration(item?: { start_frame?: number; end_frame?: number; duration_sec?: number }) {
+  if (!item) return 0;
+  const provided = Number(item.duration_sec);
   if (Number.isFinite(provided) && provided > 0) return provided;
-  const intervalSec = Number(item?.frame_interval_sec || 1);
-  return Math.max(0, (Number(item?.end_frame || 0) - Number(item?.start_frame || 0)) * intervalSec);
+  const start = Number(item.start_frame || 0);
+  const end = Number(item.end_frame || 0);
+  return Math.max(0, end - start);
+}
+
+function readDraft(key: string): DraftSnapshot | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<DraftSnapshot>;
+    return {
+      intervals: Array.isArray(parsed.intervals) ? parsed.intervals : [],
+      comment: String(parsed.comment || ""),
+      intervalStartFrame: typeof parsed.intervalStartFrame === "number" ? parsed.intervalStartFrame : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeDraft(key: string, payload: DraftSnapshot) {
+  try {
+    localStorage.setItem(key, JSON.stringify(payload));
+  } catch {
+    // ignore
+  }
+}
+
+function clearDraft(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
+
+function pickNextAssignmentId<T extends { assignment_id: string }>(items: T[], currentId: string | null) {
+  if (!items.length) return null;
+  const currentIndex = currentId ? items.findIndex((item) => item.assignment_id === currentId) : -1;
+  const nextItem = currentIndex >= 0 ? items[currentIndex + 1] ?? items[0] : items[0];
+  return nextItem?.assignment_id ?? null;
+}
+
+function TimelineStrip({
+  startFrame,
+  endFrame,
+  currentFrame,
+  intervals,
+  draftStartFrame,
+  onSeekFrame,
+}: {
+  startFrame: number;
+  endFrame: number;
+  currentFrame: number;
+  intervals: IntervalDraft[];
+  draftStartFrame: number | null;
+  onSeekFrame: (frame: number) => void;
+}) {
+  const span = Math.max(1, endFrame - startFrame);
+
+  const percentFor = (frame: number) => `${Math.min(100, Math.max(0, ((clampFrame(frame, startFrame, endFrame) - startFrame) / span) * 100))}%`;
+
+  return (
+    <button
+      type="button"
+      className="relative h-20 w-full overflow-hidden rounded-xl border border-gray-200 bg-gray-50 text-left dark:border-gray-800 dark:bg-gray-950"
+      onClick={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+        onSeekFrame(startFrame + Math.round(ratio * span));
+      }}
+    >
+      <div className="absolute inset-x-3 top-8 h-3 rounded-full bg-gray-200 dark:bg-gray-800">
+        {intervals.map((interval, index) => (
+          <div
+            key={`${interval.start_frame}-${interval.end_frame}-${index}`}
+            className="absolute top-0 h-3 rounded-full bg-emerald-500/70"
+            style={{
+              left: percentFor(interval.start_frame),
+              width: `calc(${percentFor(interval.end_frame)} - ${percentFor(interval.start_frame)})`,
+              minWidth: "2px",
+            }}
+          />
+        ))}
+        {draftStartFrame !== null ? (
+          <div className="absolute top-[-6px] h-5 w-[2px] bg-blue-500" style={{ left: percentFor(draftStartFrame) }} />
+        ) : null}
+        <div className="absolute top-[-6px] h-5 w-[2px] bg-red-500" style={{ left: percentFor(currentFrame) }} />
+      </div>
+      <div className="absolute inset-x-3 bottom-3 flex items-center justify-between text-[11px] text-gray-500 dark:text-gray-400">
+        <span>{startFrame}</span>
+        <span>{Math.round((startFrame + endFrame) / 2)}</span>
+        <span>{endFrame}</span>
+      </div>
+      <div className="absolute left-3 top-3 text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Таймлайн</div>
+    </button>
+  );
 }
 
 export default function VideoIntervalsPage() {
@@ -36,126 +141,535 @@ export default function VideoIntervalsPage() {
   const projectIdFilter = searchParams.get("projectId") || "";
   const stageFilter = searchParams.get("stage") || "intervals";
   const isValidationMode = stageFilter === "interval-validation";
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const validationVideoRef = useRef<HTMLVideoElement | null>(null);
+
   const [selectedChunkAssignmentId, setSelectedChunkAssignmentId] = useState<string | null>(null);
   const [selectedIntervalValidationId, setSelectedIntervalValidationId] = useState<string | null>(null);
   const [comment, setComment] = useState("");
   const [intervalStartFrame, setIntervalStartFrame] = useState<number | null>(null);
   const [intervals, setIntervals] = useState<IntervalDraft[]>([]);
+  const [history, setHistory] = useState<IntervalDraft[][]>([]);
+  const [future, setFuture] = useState<IntervalDraft[][]>([]);
+  const [playerState, setPlayerState] = useState({ currentTime: 0, duration: 0, paused: true, ended: false });
+  const [statusNotice, setStatusNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const playerRef = useRef<any | null>(null);
+  const intervalsRef = useRef<IntervalDraft[]>([]);
 
-  const chunkQueueQuery = useQuery({ queryKey: ["interval-chunk-queue"], queryFn: () => annotatorAPI.intervalChunkQueue() });
-  const intervalValidationQueueQuery = useQuery({ queryKey: ["interval-validation-queue"], queryFn: () => annotatorAPI.intervalValidationQueue() });
+  const chunkQueueQuery = useQuery({
+    queryKey: ["interval-chunk-queue"],
+    queryFn: () => annotatorAPI.intervalChunkQueue(),
+  });
+  const intervalValidationQueueQuery = useQuery({
+    queryKey: ["interval-validation-queue"],
+    queryFn: () => annotatorAPI.intervalValidationQueue(),
+  });
 
   const chunkItems = useMemo(
-    () => (chunkQueueQuery.data?.items ?? []).filter((item: any) => !projectIdFilter || item.project_id === projectIdFilter),
+    () => ((chunkQueueQuery.data?.items ?? []) as IntervalQueueItem[]).filter((item) => !projectIdFilter || item.project_id === projectIdFilter),
     [chunkQueueQuery.data?.items, projectIdFilter]
   );
-  const intervalValidationItems = useMemo(
-    () => (intervalValidationQueueQuery.data?.items ?? []).filter((item: any) => !projectIdFilter || item.project_id === projectIdFilter),
+  const validationItems = useMemo(
+    () => ((intervalValidationQueueQuery.data?.items ?? []) as IntervalValidationQueueItem[]).filter((item) => !projectIdFilter || item.project_id === projectIdFilter),
     [intervalValidationQueueQuery.data?.items, projectIdFilter]
   );
 
   const selectedChunk = useMemo(
-    () => chunkItems.find((item: any) => item.assignment_id === selectedChunkAssignmentId) ?? chunkItems[0] ?? null,
+    () => chunkItems.find((item) => item.assignment_id === selectedChunkAssignmentId) ?? chunkItems[0] ?? null,
     [chunkItems, selectedChunkAssignmentId]
   );
-  const selectedIntervalValidation = useMemo(
-    () => intervalValidationItems.find((item: any) => item.assignment_id === selectedIntervalValidationId) ?? intervalValidationItems[0] ?? null,
-    [intervalValidationItems, selectedIntervalValidationId]
+  const selectedValidation = useMemo(
+    () => validationItems.find((item) => item.assignment_id === selectedIntervalValidationId) ?? validationItems[0] ?? null,
+    [validationItems, selectedIntervalValidationId]
   );
-  const selectedIntervalClip = selectedIntervalValidation?.clip?.clip_uri || selectedIntervalValidation?.clip?.uri || selectedIntervalValidation?.asset_uri || "";
-  const backToProject = projectIdFilter ? `/labeling/projects/${projectIdFilter}` : "/labeling";
 
-  useEffect(() => {
-    if (!selectedChunkAssignmentId && selectedChunk?.assignment_id) setSelectedChunkAssignmentId(selectedChunk.assignment_id);
-  }, [selectedChunk?.assignment_id, selectedChunkAssignmentId]);
+  const activeItem = isValidationMode ? selectedValidation : selectedChunk;
+  const activeAssignmentId = activeItem?.assignment_id ?? null;
+  const activeDraftKey = activeAssignmentId ? `dataset_ai:video-interval:${isValidationMode ? "validation" : "annotation"}:${activeAssignmentId}` : null;
+  const activeFrameInterval = Number(activeItem?.frame_interval_sec || 1);
+  const activeStartFrame = Number(activeItem?.start_frame || 0);
+  const activeEndFrame = Number(activeItem?.end_frame || activeStartFrame);
+  const activeDurationSec = frameDuration(activeItem);
+  const validationClipStartSec = isValidationMode && selectedValidation?.clip?.clip_uri ? Number(selectedValidation.clip.start_sec || 0) : 0;
 
-  useEffect(() => {
-    if (!selectedIntervalValidationId && selectedIntervalValidation?.assignment_id) {
-      setSelectedIntervalValidationId(selectedIntervalValidation.assignment_id);
+  const mediaSrc = isValidationMode
+    ? selectedValidation?.clip?.clip_uri || selectedValidation?.clip?.uri || selectedValidation?.asset_uri || ""
+    : selectedChunk?.asset_uri || "";
+
+  const currentFrame = useMemo(() => {
+    if (!activeItem) return activeStartFrame;
+    const absoluteTime = isValidationMode ? validationClipStartSec + playerState.currentTime : playerState.currentTime;
+    return clampFrame(Math.round(absoluteTime / activeFrameInterval), activeStartFrame, activeEndFrame);
+  }, [activeFrameInterval, activeEndFrame, activeItem, activeStartFrame, isValidationMode, playerState.currentTime, validationClipStartSec]);
+
+  const totalTimeLabel = formatSeconds(activeDurationSec);
+  const defaultLabel = selectedChunk?.label_schema?.[0]?.name || "interval";
+
+  const commitIntervals = (next: IntervalDraft[]) => {
+    setHistory((prev) => [...prev, intervalsRef.current]);
+    setFuture([]);
+    setIntervals(next);
+  };
+
+  const updateInterval = (index: number, patch: Partial<IntervalDraft>) => {
+    commitIntervals(intervalsRef.current.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)));
+  };
+
+  const removeInterval = (index: number) => {
+    commitIntervals(intervalsRef.current.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const undoIntervals = () => {
+    const previous = history.at(-1);
+    if (!previous) return;
+    setFuture((prev) => [intervalsRef.current, ...prev]);
+    setHistory((prev) => prev.slice(0, -1));
+    setIntervals(previous);
+  };
+
+  const redoIntervals = () => {
+    const next = future[0];
+    if (!next) return;
+    setHistory((prev) => [...prev, intervalsRef.current]);
+    setFuture((prev) => prev.slice(1));
+    setIntervals(next);
+  };
+
+  const seekFrame = (frame: number) => {
+    const player = playerRef.current;
+    if (!player || !activeItem) return;
+    const absoluteTime = frameToTime(frame, activeFrameInterval);
+    const nextTime = isValidationMode && selectedValidation?.clip?.clip_uri ? Math.max(0, absoluteTime - validationClipStartSec) : absoluteTime;
+    player.currentTime?.(nextTime);
+  };
+
+  const stepFrames = (delta: number) => {
+    const player = playerRef.current;
+    if (!player || !activeItem) return;
+    const nextTime = Math.max(0, Number(player.currentTime?.() || 0) + delta * activeFrameInterval);
+    const duration = Number(player.duration?.() || nextTime);
+    player.currentTime?.(Math.min(nextTime, duration));
+  };
+
+  const markStart = () => {
+    if (isValidationMode || !selectedChunk) return;
+    setIntervalStartFrame(currentFrame);
+  };
+
+  const markEnd = () => {
+    if (isValidationMode || !selectedChunk) return;
+    if (intervalStartFrame === null) {
+      setIntervalStartFrame(currentFrame);
+      return;
     }
-  }, [selectedIntervalValidation?.assignment_id, selectedIntervalValidationId]);
-
-  const currentFrame = () => {
-    if (!selectedChunk || !videoRef.current) return selectedChunk?.start_frame ?? 0;
-    const intervalSec = Number(selectedChunk.frame_interval_sec || 1);
-    return clampFrame(videoRef.current.currentTime / intervalSec, selectedChunk.start_frame, selectedChunk.end_frame);
+    const start = clampFrame(Math.min(intervalStartFrame, currentFrame), activeStartFrame, activeEndFrame);
+    const end = clampFrame(Math.max(intervalStartFrame, currentFrame), activeStartFrame, activeEndFrame);
+    commitIntervals([...intervalsRef.current, { start_frame: start, end_frame: end, confidence: 1, label: defaultLabel }]);
+    setIntervalStartFrame(null);
   };
 
-  const seekChunkFrame = (frame: number) => {
-    if (!selectedChunk || !videoRef.current) return;
-    videoRef.current.currentTime = frameToTime(frame, Number(selectedChunk.frame_interval_sec || 1));
-  };
+  useEffect(() => {
+    intervalsRef.current = intervals;
+  }, [intervals]);
 
-  const seekValidationFrame = (frame: number) => {
-    if (!selectedIntervalValidation || !validationVideoRef.current) return;
-    const absoluteTime = frameToTime(frame, Number(selectedIntervalValidation.frame_interval_sec || 1));
-    const clipStart = Number(selectedIntervalValidation?.clip?.start_sec ?? 0);
-    validationVideoRef.current.currentTime = selectedIntervalValidation?.clip?.clip_uri ? Math.max(0, absoluteTime - clipStart) : absoluteTime;
-  };
+  useEffect(() => {
+    if (!chunkItems.length) {
+      setSelectedChunkAssignmentId(null);
+      return;
+    }
+    if (!selectedChunkAssignmentId || !chunkItems.some((item) => item.assignment_id === selectedChunkAssignmentId)) {
+      setSelectedChunkAssignmentId(chunkItems[0].assignment_id);
+    }
+  }, [chunkItems, selectedChunkAssignmentId]);
 
-  const saveMutation = useMutation({
-    mutationFn: async () => annotatorAPI.submitIntervalChunk(selectedChunkAssignmentId!, { intervals, comment }),
-    onSuccess: async () => {
-      setComment("");
+  useEffect(() => {
+    if (!validationItems.length) {
+      setSelectedIntervalValidationId(null);
+      return;
+    }
+    if (!selectedIntervalValidationId || !validationItems.some((item) => item.assignment_id === selectedIntervalValidationId)) {
+      setSelectedIntervalValidationId(validationItems[0].assignment_id);
+    }
+  }, [selectedIntervalValidationId, validationItems]);
+
+  useEffect(() => {
+    if (!activeDraftKey) return;
+    const draft = readDraft(activeDraftKey);
+    if (isValidationMode) {
+      setComment(draft?.comment ?? "");
       setIntervals([]);
       setIntervalStartFrame(null);
-      setSelectedChunkAssignmentId(null);
+      setHistory([]);
+      setFuture([]);
+    } else if (draft) {
+      setIntervals(draft.intervals ?? []);
+      setComment(draft.comment ?? "");
+      setIntervalStartFrame(draft.intervalStartFrame ?? null);
+      setHistory([]);
+      setFuture([]);
+    } else {
+      setIntervals([]);
+      setComment("");
+      setIntervalStartFrame(null);
+      setHistory([]);
+      setFuture([]);
+    }
+    setPlayerState({ currentTime: 0, duration: 0, paused: true, ended: false });
+  }, [activeDraftKey, isValidationMode]);
+
+  useEffect(() => {
+    if (!activeDraftKey) return;
+    const timeout = window.setTimeout(() => {
+      writeDraft(activeDraftKey, {
+        intervals: isValidationMode ? [] : intervalsRef.current,
+        comment,
+        intervalStartFrame: isValidationMode ? null : intervalStartFrame,
+      });
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [activeDraftKey, comment, intervalStartFrame, intervals, isValidationMode]);
+
+  useEffect(() => {
+    if (!statusNotice) return;
+    const timeout = window.setTimeout(() => setStatusNotice(null), 6000);
+    return () => window.clearTimeout(timeout);
+  }, [statusNotice]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) {
+        return;
+      }
+
+      if (event.key === " ") {
+        event.preventDefault();
+        const player = playerRef.current;
+        if (!player) return;
+        if (player.paused?.()) {
+          player.play?.();
+        } else {
+          player.pause?.();
+        }
+        return;
+      }
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        stepFrames(-1);
+        return;
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        stepFrames(1);
+        return;
+      }
+
+      if (!isValidationMode && event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        markStart();
+        return;
+      }
+
+      if (!isValidationMode && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        markEnd();
+        return;
+      }
+
+      if (!isValidationMode && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        undoIntervals();
+        return;
+      }
+
+      if (!isValidationMode && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redoIntervals();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeFrameInterval, activeItem, isValidationMode, redoIntervals, stepFrames, undoIntervals]);
+
+  const backToProject = projectIdFilter ? `/labeling/projects/${projectIdFilter}` : "/labeling";
+  const stageLabel = isValidationMode ? "Этап 2" : "Этап 1";
+  const pageTitle = isValidationMode ? "Валидация интервалов" : "Разметка интервалов";
+  const stageNotice = isValidationMode
+    ? "Это очередь уже размеченных интервалов. Здесь ничего не загружают — только проверяют и подтверждают результат."
+    : "Первый экран появляется сразу, а видео-плеер подгружается лениво. Используйте In/Out, таймлайн и горячие клавиши.";
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedChunk || intervalsRef.current.length === 0) {
+        throw new Error("Выберите чанк и добавьте хотя бы один интервал");
+      }
+      return annotatorAPI.submitIntervalChunk(selectedChunk.assignment_id, { intervals: intervalsRef.current, comment });
+    },
+    onSuccess: async (result: any) => {
+      const nextAssignmentId = pickNextAssignmentId(chunkItems, selectedChunkAssignmentId);
+      if (activeDraftKey) {
+        clearDraft(activeDraftKey);
+      }
+      setIntervals([]);
+      setComment("");
+      setIntervalStartFrame(null);
+      setHistory([]);
+      setFuture([]);
+      setSelectedChunkAssignmentId(nextAssignmentId);
+      setStatusNotice({
+        kind: "success",
+        text: `Интервалы отправлены. Создано ${Number(result?.intervals_created || 0)} интервалов. Очередь обновлена.`,
+      });
       await queryClient.invalidateQueries({ queryKey: ["interval-chunk-queue"] });
       await queryClient.invalidateQueries({ queryKey: ["interval-validation-queue"] });
       await queryClient.invalidateQueries({ queryKey: ["annotator-projects"] });
     },
-  });
-
-  const intervalValidateMutation = useMutation({
-    mutationFn: async (decision: "approved" | "rejected") =>
-      annotatorAPI.submitIntervalValidation(selectedIntervalValidationId!, {
-        decision,
-        comment,
-      }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["interval-validation-queue"] });
-      await queryClient.invalidateQueries({ queryKey: ["annotator-projects"] });
-      setSelectedIntervalValidationId(null);
-      setComment("");
+    onError: (err: any) => {
+      setStatusNotice({
+        kind: "error",
+        text: err?.response?.data?.detail || err?.response?.data?.error || err?.message || "Не удалось отправить интервалы.",
+      });
     },
   });
 
-  const addIntervalPoint = () => {
-    if (!selectedChunk) return;
-    const frame = currentFrame();
-    if (intervalStartFrame === null) {
-      setIntervalStartFrame(frame);
-      return;
-    }
-    const start = clampFrame(Math.min(intervalStartFrame, frame), selectedChunk.start_frame, selectedChunk.end_frame);
-    const end = clampFrame(Math.max(intervalStartFrame, frame), selectedChunk.start_frame, selectedChunk.end_frame);
-    if (end >= start) {
-      setIntervals((prev) => [...prev, { start_frame: start, end_frame: end, confidence: 1, label: "object" }]);
-    }
-    setIntervalStartFrame(null);
-  };
+  const validationMutation = useMutation({
+    mutationFn: async (decision: "approved" | "rejected") => {
+      if (!selectedValidation) {
+        throw new Error("Выберите интервал для проверки");
+      }
+      return annotatorAPI.submitIntervalValidation(selectedValidation.assignment_id, {
+        decision,
+        comment,
+      });
+    },
+    onSuccess: async (result: any) => {
+      const nextAssignmentId = pickNextAssignmentId(validationItems, selectedIntervalValidationId);
+      if (activeDraftKey) {
+        clearDraft(activeDraftKey);
+      }
+      setComment("");
+      setIntervals([]);
+      setIntervalStartFrame(null);
+      setHistory([]);
+      setFuture([]);
+      setSelectedIntervalValidationId(nextAssignmentId);
+      setStatusNotice({
+        kind: "success",
+        text: `Решение отправлено. Текущий статус: ${String(result?.interval_status || "updated")}.`,
+      });
+      await queryClient.invalidateQueries({ queryKey: ["interval-validation-queue"] });
+      await queryClient.invalidateQueries({ queryKey: ["annotator-projects"] });
+    },
+    onError: (err: any) => {
+      setStatusNotice({
+        kind: "error",
+        text: err?.response?.data?.detail || err?.response?.data?.error || err?.message || "Не удалось отправить решение проверки.",
+      });
+    },
+  });
 
-  const activeItem = isValidationMode ? selectedIntervalValidation : selectedChunk;
-  const activeDuration = chunkDuration(activeItem);
-  const durationTone =
-    activeDuration > 60
-      ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
-      : "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200";
-  const validationClipDuration = Number(selectedIntervalValidation?.clip?.duration_sec || selectedIntervalValidation?.duration_sec || 0);
+  const renderChunkControls = () => (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr),320px]">
+      <div className="space-y-4">
+        <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Разметка</div>
+              <div className="mt-1 text-sm font-medium text-gray-900 dark:text-white">
+                Кадр {currentFrame} · {formatSeconds(playerState.currentTime)} / {totalTimeLabel}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button className="btn-secondary" type="button" onClick={() => stepFrames(-1)}>
+                -1 frame
+              </button>
+              <button className="btn-secondary" type="button" onClick={() => stepFrames(1)}>
+                +1 frame
+              </button>
+              <button className="btn-secondary" type="button" onClick={markStart}>
+                In
+              </button>
+              <button className="btn-secondary" type="button" onClick={markEnd}>
+                Out
+              </button>
+              <button className="btn-secondary" type="button" onClick={undoIntervals} disabled={history.length === 0}>
+                Undo
+              </button>
+              <button className="btn-secondary" type="button" onClick={redoIntervals} disabled={future.length === 0}>
+                Redo
+              </button>
+            </div>
+          </div>
+          <div className="mt-3">
+            <TimelineStrip
+              startFrame={activeStartFrame}
+              endFrame={activeEndFrame}
+              currentFrame={currentFrame}
+              intervals={intervals}
+              draftStartFrame={intervalStartFrame}
+              onSeekFrame={seekFrame}
+            />
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <span>Горячие клавиши: Space play/pause, I in, O out, стрелки шаг, Ctrl+Z undo, Ctrl+Y redo.</span>
+          </div>
+        </div>
+
+        <VideoJsPlayer
+          key={selectedChunk?.assignment_id || "chunk-empty"}
+          src={mediaSrc}
+          initialTime={0}
+          onReady={(player) => {
+            playerRef.current = player;
+          }}
+          onStateChange={setPlayerState}
+          onError={(message) => {
+            setStatusNotice({ kind: "error", text: message });
+          }}
+        />
+
+        <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-gray-900 dark:text-white">Интервалы</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Черновик сохраняется автоматически в браузере.</div>
+            </div>
+            <button className="btn-primary" type="button" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || intervals.length === 0}>
+              {saveMutation.isPending ? "Отправка..." : "Отправить интервалы"}
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            {intervals.map((interval, index) => (
+              <div key={`${interval.start_frame}-${interval.end_frame}-${index}`} className="grid grid-cols-[1fr,1fr,auto] gap-2 rounded-lg border border-gray-200 p-2 text-sm dark:border-gray-800">
+                <input
+                  className="input-field"
+                  type="number"
+                  value={interval.start_frame}
+                  onChange={(event) => updateInterval(index, { start_frame: clampFrame(Number(event.target.value || 0), activeStartFrame, activeEndFrame) })}
+                />
+                <input
+                  className="input-field"
+                  type="number"
+                  value={interval.end_frame}
+                  onChange={(event) => updateInterval(index, { end_frame: clampFrame(Number(event.target.value || 0), activeStartFrame, activeEndFrame) })}
+                />
+                <button className="btn-secondary" type="button" onClick={() => removeInterval(index)}>
+                  Удалить
+                </button>
+              </div>
+            ))}
+            {intervals.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">
+                Поставьте In и Out на нужных кадрах или нажмите кнопки на таймлайне.
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+          <div className="text-sm font-medium text-gray-900 dark:text-white">Комментарий</div>
+          <textarea
+            className="input-field mt-3 min-h-[120px]"
+            placeholder="Комментарий к интервалам"
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+          />
+          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">Автосохранение включено.</div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderValidationControls = () => (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr),320px]">
+      <div className="space-y-4">
+        <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Проверка</div>
+              <div className="mt-1 text-sm font-medium text-gray-900 dark:text-white">
+                Интервал {selectedValidation?.start_frame}-{selectedValidation?.end_frame} · {formatSeconds(activeDurationSec)}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button className="btn-secondary" type="button" onClick={() => stepFrames(-1)}>
+                -1 frame
+              </button>
+              <button className="btn-secondary" type="button" onClick={() => stepFrames(1)}>
+                +1 frame
+              </button>
+              <button className="btn-secondary" type="button" onClick={() => seekFrame(selectedValidation?.start_frame || activeStartFrame)}>
+                К началу
+              </button>
+              <button className="btn-secondary" type="button" onClick={() => seekFrame(selectedValidation?.end_frame || activeEndFrame)}>
+                К концу
+              </button>
+            </div>
+          </div>
+          <div className="mt-3">
+            <TimelineStrip
+              startFrame={activeStartFrame}
+              endFrame={activeEndFrame}
+              currentFrame={currentFrame}
+              intervals={[]}
+              draftStartFrame={null}
+              onSeekFrame={seekFrame}
+            />
+          </div>
+          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+            Отрывок интервала с небольшим контекстом. Границы clip: {selectedValidation?.clip?.start_sec?.toFixed?.(1) ?? validationClipStartSec.toFixed(1)}-
+            {(Number(selectedValidation?.clip?.start_sec || 0) + Number(selectedValidation?.clip?.duration_sec || 0)).toFixed(1)} с.
+          </div>
+        </div>
+
+        <VideoJsPlayer
+          key={selectedValidation?.assignment_id || "validation-empty"}
+          src={mediaSrc}
+          initialTime={0}
+          onReady={(player) => {
+            playerRef.current = player;
+          }}
+          onStateChange={setPlayerState}
+          onError={(message) => {
+            setStatusNotice({ kind: "error", text: message });
+          }}
+        />
+      </div>
+
+      <div className="space-y-4">
+        <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+          <div className="text-sm font-medium text-gray-900 dark:text-white">Комментарий к проверке</div>
+          <textarea
+            className="input-field mt-3 min-h-[120px]"
+            placeholder="Комментарий к валидации"
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+          />
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button className="btn-primary" type="button" onClick={() => validationMutation.mutate("approved")} disabled={validationMutation.isPending}>
+              Подтвердить
+            </button>
+            <button className="btn-secondary" type="button" onClick={() => validationMutation.mutate("rejected")} disabled={validationMutation.isPending}>
+              Отклонить
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-[calc(100vh-6rem)] space-y-4">
       <div className="sticky top-0 z-20 -mx-4 border-b border-gray-200 bg-white/95 px-4 py-3 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-              {isValidationMode ? "Этап 2" : "Этап 1"}
-            </div>
-            <h1 className="truncate text-xl font-semibold text-gray-900 dark:text-white">
-              {isValidationMode ? "Валидация интервалов" : "Разметка интервалов"}
-            </h1>
+            <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{stageLabel}</div>
+            <h1 className="truncate text-xl font-semibold text-gray-900 dark:text-white">{pageTitle}</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Link className={!isValidationMode ? "btn-primary" : "btn-secondary"} to={`/labeling/intervals${projectIdFilter ? `?projectId=${projectIdFilter}&stage=intervals` : ""}`}>
@@ -171,177 +685,77 @@ export default function VideoIntervalsPage() {
         </div>
       </div>
 
-      {!isValidationMode ? (
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(220px,320px),minmax(0,1fr)]">
-          <aside className="space-y-2 xl:max-h-[calc(100vh-12rem)] xl:overflow-auto">
-            <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-medium text-gray-900 dark:text-white">Очередь чанков</div>
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{chunkItems.length} задач</div>
+      {statusNotice ? (
+        <div
+          className={`rounded-lg border p-3 text-sm ${
+            statusNotice.kind === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100"
+              : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-100"
+          }`}
+        >
+          {statusNotice.text}
+        </div>
+      ) : null}
+
+      <div className={`rounded-xl border p-3 text-sm ${isValidationMode ? "border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100" : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100"}`}>
+        {stageNotice}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(220px,320px),minmax(0,1fr)]">
+        <aside className="space-y-2 xl:max-h-[calc(100vh-12rem)] xl:overflow-auto">
+          <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+            <div className="text-sm font-medium text-gray-900 dark:text-white">
+              {isValidationMode ? "Очередь валидации" : "Очередь чанкoв"}
             </div>
-            {chunkItems.map((item: any) => (
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{isValidationMode ? `${validationItems.length} задач` : `${chunkItems.length} задач`}</div>
+          </div>
+
+          {(isValidationMode ? validationItems : chunkItems).map((item: any) => {
+            const isSelected = activeAssignmentId === item.assignment_id;
+            const title = item.project_title;
+            const details = isValidationMode
+              ? `${item.start_frame}-${item.end_frame} · ${formatSeconds(Number(item.duration_sec || 0))}`
+              : `Кадры ${item.start_frame}-${item.end_frame} · ${formatSeconds(Number(item.duration_sec || 0))}`;
+
+            return (
               <button
                 key={item.assignment_id}
-                className={`w-full rounded-lg border p-3 text-left transition ${
-                  selectedChunk?.assignment_id === item.assignment_id
-                    ? "border-blue-500 bg-blue-50 dark:bg-blue-950"
-                    : "border-gray-200 bg-white hover:border-gray-300 dark:border-gray-800 dark:bg-gray-950"
+                className={`w-full rounded-xl border p-3 text-left transition ${
+                  isSelected ? "border-blue-500 bg-blue-50 dark:bg-blue-950" : "border-gray-200 bg-white hover:border-gray-300 dark:border-gray-800 dark:bg-gray-950"
                 }`}
                 onClick={() => {
-                  setSelectedChunkAssignmentId(item.assignment_id);
-                  setIntervals([]);
-                  setIntervalStartFrame(null);
+                  if (isValidationMode) {
+                    setSelectedIntervalValidationId(item.assignment_id);
+                  } else {
+                    setSelectedChunkAssignmentId(item.assignment_id);
+                  }
+                  playerRef.current?.pause?.();
+                  setPlayerState({ currentTime: 0, duration: 0, paused: true, ended: false });
                 }}
               >
-                <div className="truncate text-sm font-medium text-gray-900 dark:text-white">{item.project_title}</div>
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Кадры {item.start_frame}-{item.end_frame} · {formatSeconds(chunkDuration(item))}
-                </div>
+                <div className="truncate text-sm font-medium text-gray-900 dark:text-white">{title}</div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{details}</div>
               </button>
-            ))}
-            {chunkItems.length === 0 ? <div className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">Нет задач разметки интервалов.</div> : null}
-          </aside>
+            );
+          })}
 
-          <main className="space-y-4">
-            {selectedChunk ? (
-              <>
-                <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button className="btn-secondary" type="button" onClick={() => seekChunkFrame(selectedChunk.start_frame)}>
-                        К началу
-                      </button>
-                      <button className="btn-secondary" type="button" onClick={() => seekChunkFrame(selectedChunk.end_frame)}>
-                        К концу
-                      </button>
-                      <button className="btn-primary" type="button" onClick={addIntervalPoint}>
-                        {intervalStartFrame === null ? "Поставить начало" : "Поставить конец"}
-                      </button>
-                    </div>
-                    <div className={`rounded-lg border px-3 py-2 text-sm ${durationTone}`}>{formatSeconds(activeDuration)}</div>
-                  </div>
-                  {intervalStartFrame !== null ? <div className="mt-2 text-sm text-blue-600 dark:text-blue-300">Начало интервала: кадр {intervalStartFrame}</div> : null}
-                </div>
-
-                <div className="flex justify-center rounded-lg bg-neutral-950 p-2">
-                  <video ref={videoRef} className="max-h-[68vh] w-full max-w-6xl rounded bg-black object-contain" src={selectedChunk.asset_uri} controls />
-                </div>
-
-                <section className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr),320px]">
-                  <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-                    <div className="mb-3 text-sm font-medium text-gray-900 dark:text-white">Интервалы</div>
-                    <div className="space-y-2">
-                      {intervals.map((interval, index) => (
-                        <div key={`${interval.start_frame}-${interval.end_frame}-${index}`} className="grid grid-cols-[1fr,1fr,auto] gap-2 rounded-lg border border-gray-200 p-2 text-sm dark:border-gray-800">
-                          <input
-                            className="input-field"
-                            type="number"
-                            value={interval.start_frame}
-                            onChange={(event) => {
-                              const value = clampFrame(Number(event.target.value || 0), selectedChunk.start_frame, selectedChunk.end_frame);
-                              setIntervals((prev) => prev.map((item, itemIndex) => (itemIndex === index ? { ...item, start_frame: value } : item)));
-                            }}
-                          />
-                          <input
-                            className="input-field"
-                            type="number"
-                            value={interval.end_frame}
-                            onChange={(event) => {
-                              const value = clampFrame(Number(event.target.value || 0), selectedChunk.start_frame, selectedChunk.end_frame);
-                              setIntervals((prev) => prev.map((item, itemIndex) => (itemIndex === index ? { ...item, end_frame: value } : item)));
-                            }}
-                          />
-                          <button className="btn-secondary" type="button" onClick={() => setIntervals((prev) => prev.filter((_, i) => i !== index))}>
-                            Удалить
-                          </button>
-                        </div>
-                      ))}
-                      {intervals.length === 0 ? <div className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">Поставьте начало и конец интервала по текущему времени видео.</div> : null}
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-                    <textarea className="input-field min-h-[120px]" placeholder="Комментарий к интервалам" value={comment} onChange={(event) => setComment(event.target.value)} />
-                    <button className="btn-primary mt-3 w-full" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-                      {saveMutation.isPending ? "Отправка..." : "Отправить интервалы"}
-                    </button>
-                  </div>
-                </section>
-              </>
-            ) : (
-              <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500 dark:border-gray-700">Выберите чанк из очереди.</div>
-            )}
-          </main>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(220px,320px),minmax(0,1fr)]">
-          <aside className="space-y-2 xl:max-h-[calc(100vh-12rem)] xl:overflow-auto">
-            <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-medium text-gray-900 dark:text-white">Очередь валидации</div>
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{intervalValidationItems.length} задач</div>
+          {(isValidationMode ? validationItems : chunkItems).length === 0 ? (
+            <div className="rounded-xl border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">
+              {isValidationMode ? "Нет задач валидации интервалов." : "Нет задач разметки интервалов."}
             </div>
-            {intervalValidationItems.map((item: any) => (
-              <button
-                key={item.assignment_id}
-                className={`w-full rounded-lg border p-3 text-left transition ${
-                  selectedIntervalValidation?.assignment_id === item.assignment_id
-                    ? "border-blue-500 bg-blue-50 dark:bg-blue-950"
-                    : "border-gray-200 bg-white hover:border-gray-300 dark:border-gray-800 dark:bg-gray-950"
-                }`}
-                onClick={() => setSelectedIntervalValidationId(item.assignment_id)}
-              >
-                <div className="truncate text-sm font-medium text-gray-900 dark:text-white">{item.project_title}</div>
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Интервал {item.start_frame}-{item.end_frame} · {formatSeconds(chunkDuration(item))}
-                </div>
-              </button>
-            ))}
-            {intervalValidationItems.length === 0 ? <div className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">Нет задач валидации интервалов.</div> : null}
-          </aside>
+          ) : null}
+        </aside>
 
-          <main className="space-y-4">
-            {selectedIntervalValidation ? (
-              <>
-                <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button className="btn-secondary" type="button" onClick={() => seekValidationFrame(selectedIntervalValidation.start_frame)}>
-                        К началу
-                      </button>
-                      <button className="btn-secondary" type="button" onClick={() => seekValidationFrame(selectedIntervalValidation.end_frame)}>
-                        К концу
-                      </button>
-                    </div>
-                    <div className={`rounded-lg border px-3 py-2 text-sm ${durationTone}`}>
-                      {selectedIntervalValidation.start_frame}-{selectedIntervalValidation.end_frame} · {formatSeconds(validationClipDuration || activeDuration)}
-                    </div>
-                  </div>
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Отрывок интервала с небольшим контекстом. Границы: {selectedIntervalValidation.start_sec?.toFixed?.(1) ?? Number(selectedIntervalValidation.start_sec || 0).toFixed(1)}-
-                    {selectedIntervalValidation.end_sec?.toFixed?.(1) ?? Number(selectedIntervalValidation.end_sec || 0).toFixed(1)} сек.
-                  </div>
-                </div>
-
-                <div className="flex justify-center rounded-lg bg-neutral-950 p-2">
-                  <video ref={validationVideoRef} className="max-h-[68vh] w-full max-w-6xl rounded bg-black object-contain" src={selectedIntervalClip} controls />
-                </div>
-
-                <section className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-                  <textarea className="input-field min-h-[96px]" placeholder="Комментарий к валидации" value={comment} onChange={(event) => setComment(event.target.value)} />
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button className="btn-primary" onClick={() => intervalValidateMutation.mutate("approved")} disabled={intervalValidateMutation.isPending}>
-                      Подтвердить
-                    </button>
-                    <button className="btn-secondary" onClick={() => intervalValidateMutation.mutate("rejected")} disabled={intervalValidateMutation.isPending}>
-                      Отклонить
-                    </button>
-                  </div>
-                </section>
-              </>
-            ) : (
-              <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500 dark:border-gray-700">Выберите интервал для проверки.</div>
-            )}
-          </main>
-        </div>
-      )}
+        <main className="space-y-4">
+          {activeItem ? (
+            isValidationMode ? renderValidationControls() : renderChunkControls()
+          ) : (
+            <div className="rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500 dark:border-gray-700">
+              {isValidationMode ? "Выберите интервал для проверки." : "Выберите чанк из очереди."}
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

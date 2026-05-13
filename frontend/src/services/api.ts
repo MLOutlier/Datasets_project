@@ -1,4 +1,4 @@
-import axios, { AxiosError, AxiosInstance, AxiosRequestConfig, isAxiosError } from "axios";
+import axios, { AxiosError, AxiosInstance, isAxiosError } from "axios";
 import {
   AnnotateRequest,
   AnnotatorProjectDetail,
@@ -69,6 +69,8 @@ export function setTokens(accessToken: string, refreshToken?: string | null) {
     localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
     if (refreshToken) {
       localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+    } else {
+      localStorage.removeItem(REFRESH_TOKEN_KEY);
     }
   } catch {
     // ignore
@@ -95,32 +97,6 @@ export const api: AxiosInstance = axios.create({
   timeout: 30000,
 });
 
-const refreshClient: AxiosInstance = axios.create({
-  baseURL: apiBaseUrl,
-  timeout: 30000,
-});
-
-type RetriableConfig = AxiosRequestConfig & { _retry?: boolean };
-
-async function refreshAccessToken(): Promise<string | null> {
-  const refreshToken = getRefreshToken();
-  const payload = refreshToken ? { refresh: refreshToken } : {};
-  try {
-    const res = await refreshClient.post<AuthResponse>("/api/auth/token/refresh/", payload, {
-      headers: { "Content-Type": "application/json" },
-    });
-    const access = res.data.access;
-    const nextRefresh = res.data.refresh;
-    if (access) {
-      setTokens(access, nextRefresh ?? refreshToken);
-      return access;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 api.interceptors.request.use((config) => {
   console.log('🔵 Axios Request:', config.method?.toUpperCase(), config.url);
   const token = getAccessToken();
@@ -136,20 +112,17 @@ api.interceptors.response.use(
     console.log('🟢 Axios Response:', response.config.method?.toUpperCase(), response.config.url, response.status);
     return response;
   },
-  async (error: AxiosError<ApiErrorResponse>) => {
+  (error: AxiosError<ApiErrorResponse>) => {
     console.log('🔴 Axios Error:', error.config?.method?.toUpperCase(), error.config?.url, error.response?.status);
     if (!isAxiosError(error)) return Promise.reject(error);
     const { response, config } = error;
     if (!response || !config) return Promise.reject(error);
     const status = response.status;
-    const retriableConfig = config as RetriableConfig;
-    if (status === 401 && !retriableConfig._retry) {
-      retriableConfig._retry = true;
-      const nextAccess = await refreshAccessToken();
-      if (nextAccess) {
-        retriableConfig.headers = retriableConfig.headers ?? {};
-        retriableConfig.headers.Authorization = `Bearer ${nextAccess}`;
-        return api.request(retriableConfig);
+    if (status === 401) {
+      const requestUrl = String(config.url || "");
+      const isAuthEndpoint = requestUrl.includes("/api/auth/login/") || requestUrl.includes("/api/auth/register/");
+      if (!isAuthEndpoint) {
+        clearTokens();
       }
     }
     return Promise.reject(error);

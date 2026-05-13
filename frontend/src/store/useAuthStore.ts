@@ -30,12 +30,12 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ loading: true, error: null });
     queryClient.clear();
     const res: AuthResponse = await authAPI.login(body);
-    setTokens(res.access, res.refresh ?? getRefreshToken());
+    setTokens(res.access, res.refresh ?? null);
     queryClient.clear();
     set({
       user: res.user ?? null,
       accessToken: res.access,
-      refreshToken: res.refresh ?? getRefreshToken(),
+      refreshToken: res.refresh ?? null,
       isAuthenticated: true,
       loading: false,
     });
@@ -56,13 +56,13 @@ export const useAuthStore = create<AuthState>((set) => ({
       console.log('📦 [useAuthStore.register] Регистрация успешна:', { userId: user.id });
 
       if (res.access) {
-        setTokens(res.access, res.refresh ?? getRefreshToken());
+        setTokens(res.access, res.refresh ?? null);
       }
       queryClient.clear();
       set({
         user,
         accessToken: res.access ?? getAccessToken(),
-        refreshToken: res.refresh ?? getRefreshToken(),
+        refreshToken: res.refresh ?? null,
         isAuthenticated: true,
         loading: false,
         error: null,

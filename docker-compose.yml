@@ -110,7 +110,7 @@ services:
     depends_on:
       - web
     ports:
-      - "3000:5173"
+      - "3001:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules

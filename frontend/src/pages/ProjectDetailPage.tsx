@@ -5,6 +5,7 @@ import { isAxiosError } from "axios";
 import { projectsAPI, workflowAPI, dawidSkeneAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
+import { getTaskFlowCopy, getTaskGroupLabel } from "../lib/taskFlowCopy";
 
 function DawidSkeneQuality({ projectId }: { projectId: string }) {
   const qualityQuery = useQuery({
@@ -348,7 +349,7 @@ export default function ProjectDetailPage() {
 
   const overview = overviewQuery.data;
   const taskType = String(projectQuery.data?.task_type || "bbox_annotation");
-  const widgetType = String(projectQuery.data?.widget_type || "");
+  const taskCopy = getTaskFlowCopy(taskType);
   const isGenericTask = ["text_annotation", "image_annotation", "classification", "comparison"].includes(taskType);
   const isValidationTask = ["video_interval_validation", "bbox_validation"].includes(taskType);
   const canUploadMedia = ["bbox_annotation", "video_annotation", "image_annotation"].includes(taskType);
@@ -426,7 +427,7 @@ export default function ProjectDetailPage() {
       <div className="flex items-start justify-between gap-6">
         <div>
           <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            {projectQuery.data.project_type} / {projectQuery.data.annotation_type} / {taskType} / {widgetType}
+            {projectQuery.data.project_type} / {getTaskGroupLabel(taskType)} / {taskCopy.projectTitle}
           </div>
           <h1 className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{projectQuery.data.title}</h1>
           <p className="mt-3 max-w-3xl text-sm text-gray-600 dark:text-gray-400">{projectQuery.data.description}</p>
@@ -475,6 +476,21 @@ export default function ProjectDetailPage() {
           Источник данных: {projectQuery.data.source_project_title || projectQuery.data.source_project_id}. Нажмите Sync workflow, чтобы материализовать задания валидации из source-проекта.
         </div>
       ) : null}
+
+      <div className={`rounded-lg border p-4 ${taskCopy.group === "video" ? "border-blue-200 bg-blue-50 text-blue-950 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100" : taskCopy.group === "bbox" ? "border-emerald-200 bg-emerald-50 text-emerald-950 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100" : "border-gray-200 bg-gray-50 text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"}`}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{getTaskGroupLabel(taskType)}</div>
+            <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-white">{taskCopy.projectTitle}</h2>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{taskCopy.projectDescription}</p>
+          </div>
+          {taskCopy.annotatorRoute ? (
+            <Link to={taskCopy.annotatorRoute(projectId!)} className="btn-primary">
+              {taskCopy.annotatorTitle}
+            </Link>
+          ) : null}
+        </div>
+      </div>
 
       {isGenericTask ? (
         <div className="card space-y-4">
@@ -700,13 +716,9 @@ export default function ProjectDetailPage() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr,0.8fr]">
         <div className="card space-y-4">
           <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">{canUploadMedia ? "Import media" : "Source / task generation"}</h2>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">{taskCopy.importTitle}</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-              {canUploadMedia
-                ? "Upload images or videos. Videos are split into frames using the project frame interval."
-                : isValidationTask
-                  ? "This project receives items from its source project through workflow sync."
-                  : "This project uses generic Task setup instead of CV media import."}
+              {taskCopy.importDescription}
             </p>
           </div>
           <input
