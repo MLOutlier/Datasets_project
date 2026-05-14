@@ -12,8 +12,8 @@ type NavItem = {
 const items: NavItem[] = [
   { to: "/", label: "Дашборд", icon: "📊", roles: ["customer", "annotator", "admin"] },
   { to: "/projects", label: "Проекты", icon: "📁", roles: ["customer", "admin"] },
-  { to: "/datasets", label: "Датасеты", icon: "🗂️", roles: ["annotator", "admin"] },
-  { to: "/tasks", label: "Задачи", icon: "✅", roles: ["customer", "admin"] },
+  { to: "/datasets", label: "Датасеты", icon: "🗂️", roles: ["customer", "annotator", "admin"] },
+  { to: "/tasks", label: "Задачи", icon: "✅", roles: ["customer", "annotator", "admin"] },
   { to: "/labeling", label: "Разметка", icon: "🏷️", roles: ["annotator", "admin"] },
   { to: "/quality", label: "Качество", icon: "⭐", roles: ["customer", "admin"] },
   { to: "/finance", label: "Финансы", icon: "💰", roles: ["customer", "annotator", "admin"] },
@@ -27,6 +27,7 @@ export function Sidebar() {
 
   return (
     <aside className="fixed left-0 top-0 z-40 flex h-full w-72 min-w-[280px] flex-col border-r border-gray-200 bg-white transition-colors duration-300 dark:border-gray-700 dark:bg-gray-800">
+      {/* Логотип */}
       <div className="h-16 border-b border-gray-200 bg-gray-50 px-6 dark:border-gray-700 dark:bg-gray-900">
         <NavLink to="/" className="flex h-full items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-primary">
@@ -38,6 +39,7 @@ export function Sidebar() {
         </NavLink>
       </div>
 
+      {/* Навигация */}
       <nav className="flex-1 py-6 px-3 space-y-1 overflow-y-auto">
         {visibleItems.map((item) => (
           <NavLink
@@ -51,12 +53,13 @@ export function Sidebar() {
               }`
             }
           >
-            <span className="mr-3 text-lg">{item.icon}</span>
+            <span className="mr-3 text-xl">{item.icon}</span>
             <span className="flex-1">{item.label}</span>
           </NavLink>
         ))}
       </nav>
 
+      {/* Профиль внизу */}
       <div className="border-t border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900">
         {user ? (
           <div className="flex items-center gap-3">
@@ -65,11 +68,13 @@ export function Sidebar() {
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-semibold text-gray-900 dark:text-white">{user.username}</p>
-              <p className="text-xs capitalize text-gray-500 dark:text-gray-400">{user.role}</p>
+              <p className="text-xs capitalize text-gray-500 dark:text-gray-400">
+                {user.role === "customer" ? "Заказчик" : user.role === "annotator" ? "Аннотатор" : user.role === "reviewer" ? "Рецензент" : "Администратор"}
+              </p>
             </div>
           </div>
         ) : (
-          <p className="text-center text-xs text-gray-500 dark:text-gray-400">Not authenticated</p>
+          <p className="text-center text-xs text-gray-500 dark:text-gray-400">Не авторизован</p>
         )}
       </div>
     </aside>

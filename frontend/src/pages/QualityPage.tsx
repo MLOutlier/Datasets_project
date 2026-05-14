@@ -71,7 +71,7 @@ export function QualityPage() {
   if (user?.role !== "customer" && user?.role !== "admin") {
     return (
       <div className="card p-8 text-center">
-        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Валидация</h1>
+        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">🔍 Валидация</h1>
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Этот раздел доступен владельцам проектов и администраторам.</p>
       </div>
     );
@@ -81,15 +81,15 @@ export function QualityPage() {
 
   return (
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-[0.88fr,1.12fr]">
+      {/* Левая колонка: очередь пакетов */}
       <div className="card">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Очередь валидации</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">📋 Очередь валидации</h1>
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-          Здесь заказчик отслеживает качество и спорные пакеты. Рабочая bbox-валидация исполнителей выполняется в разделе разметки.
+          Здесь отображаются пакеты кадров, готовые к проверке. Выберите пакет, просмотрите разметку и примите решение по каждому кадру.
         </p>
+
         {queueQuery.isLoading ? (
-          <div className="mt-6 flex justify-center">
-            <LoadingSpinner size="lg" />
-          </div>
+          <div className="mt-6 flex justify-center"><LoadingSpinner size="lg" /></div>
         ) : queueItems.length === 0 ? (
           <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400">
             В очереди валидации пока нет готовых пакетов.
@@ -104,7 +104,11 @@ export function QualityPage() {
                   key={key}
                   type="button"
                   onClick={() => setSelectedBatchKey(key)}
-                  className={`w-full rounded-lg border p-4 text-left transition ${isSelected ? "border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-900/30" : "border-gray-200 bg-white hover:border-gray-300 dark:border-gray-700 dark:bg-gray-950"}`}
+                  className={`w-full rounded-lg border p-4 text-left transition ${
+                    isSelected
+                      ? "border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-900/30"
+                      : "border-gray-200 bg-white hover:border-gray-300 dark:border-gray-700 dark:bg-gray-950"
+                  }`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -114,10 +118,10 @@ export function QualityPage() {
                     <span className="badge badge-warning">{item.frames_total} кадров</span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-3 text-xs text-gray-500 dark:text-gray-400">
-                    <span>Принято: {item.approved_frames}</span>
-                    <span>На доработку: {item.needs_changes_frames}</span>
-                    <span>Флаги QC: {item.flagged_frames}</span>
-                    <span>Среднее согласие: {item.average_agreement.toFixed(2)}</span>
+                    <span>✅ Принято: {item.approved_frames}</span>
+                    <span>🔄 На доработку: {item.needs_changes_frames}</span>
+                    <span>⚠️ Флаги QC: {item.flagged_frames}</span>
+                    <span>📊 Среднее согласие: {item.average_agreement.toFixed(2)}</span>
                   </div>
                 </button>
               );
@@ -126,6 +130,7 @@ export function QualityPage() {
         )}
       </div>
 
+      {/* Правая колонка: детали выбранного пакета */}
       <div className="card space-y-4">
         {!selectedQueueItem || !batchDetailQuery.data ? (
           <div className="text-sm text-gray-500 dark:text-gray-400">Выберите пакет из очереди, чтобы открыть кадры и принять решение по каждому из них.</div>
@@ -134,9 +139,7 @@ export function QualityPage() {
             <div>
               <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{batchDetailQuery.data.project_title}</div>
               <h2 className="mt-2 text-2xl font-bold text-gray-900 dark:text-white">Валидация пакета #{batchDetailQuery.data.batch_number}</h2>
-              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                Кадров в пакете: {batchDetailQuery.data.frames_total}
-              </div>
+              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">Кадров в пакете: {batchDetailQuery.data.frames_total}</div>
             </div>
 
             <div className="grid grid-cols-1 gap-4">
@@ -149,13 +152,14 @@ export function QualityPage() {
                       <div>
                         <div className="text-sm font-semibold text-gray-900 dark:text-white">Кадр {index + 1} / {batchDetailQuery.data.items.length}</div>
                         <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                          №{item.frame_number} | bbox: {item.final_box_count ?? 0} | agreement: {Number(item.agreement_score ?? 0).toFixed(2)}
+                          №{item.frame_number} | bbox: {item.final_box_count ?? 0} | согласие: {Number(item.agreement_score ?? 0).toFixed(2)}
                         </div>
                       </div>
-                      {flagged ? <span className="badge badge-warning">QC flag</span> : <span className="badge badge-success">OK</span>}
+                      {flagged ? <span className="badge badge-warning">⚠️ QC флаг</span> : <span className="badge badge-success">✅ OK</span>}
                     </div>
 
                     <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[220px,1fr]">
+                      {/* Превью кадра с рамками */}
                       <div className="relative h-40 w-full overflow-hidden rounded-lg border border-gray-200 bg-black dark:border-gray-800">
                         <img src={item.frame_url} alt={`Кадр ${item.frame_number}`} className="h-full w-full object-contain" />
                         {(item.final_annotation?.boxes ?? []).map((box, boxIndex) => (
@@ -171,16 +175,22 @@ export function QualityPage() {
                           />
                         ))}
                       </div>
+
+                      {/* Панель управления */}
                       <div className="space-y-3">
                         <div className="rounded-lg border border-gray-200 bg-white p-3 text-xs dark:border-gray-800 dark:bg-gray-900">
-                          <div className="font-medium text-gray-900 dark:text-white">Результат разметки</div>
-                          <pre className="mt-2 max-h-32 overflow-auto text-[11px] text-gray-700 dark:text-gray-300">{JSON.stringify(item.final_annotation ?? { boxes: [] }, null, 2)}</pre>
+                          <div className="font-medium text-gray-900 dark:text-white">📐 Результат разметки</div>
+                          <pre className="mt-2 max-h-32 overflow-auto text-[11px] text-gray-700 dark:text-gray-300">
+                            {JSON.stringify(item.final_annotation ?? { boxes: [] }, null, 2)}
+                          </pre>
                         </div>
-                        {flagged ? (
+
+                        {flagged && (
                           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-                            Межкадровая проверка обнаружила подозрительное расхождение. Такой кадр удобно отправлять на доработку.
+                            🔍 Межкадровая проверка обнаружила подозрительное расхождение. Такой кадр удобно отправлять на доработку.
                           </div>
-                        ) : null}
+                        )}
+
                         <div className="grid grid-cols-1 gap-3 md:grid-cols-[220px,1fr]">
                           <select
                             className="input-field"
@@ -192,8 +202,8 @@ export function QualityPage() {
                               }))
                             }
                           >
-                            <option value="approve">Принять</option>
-                            <option value="needs_changes">На доработку</option>
+                            <option value="approve">✅ Принять</option>
+                            <option value="needs_changes">🔄 На доработку</option>
                           </select>
                           <input
                             className="input-field"
@@ -204,7 +214,7 @@ export function QualityPage() {
                                 [item.work_item_id]: { ...state, comment: event.target.value },
                               }))
                             }
-                            placeholder="Комментарий по кадру"
+                            placeholder="Комментарий по кадру (необязательно)"
                           />
                         </div>
                       </div>
@@ -215,57 +225,16 @@ export function QualityPage() {
             </div>
 
             <div>
-              <div className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">Комментарий к пакету</div>
-              <textarea className="input-field min-h-[110px]" value={batchComment} onChange={(event) => setBatchComment(event.target.value)} placeholder="Общий комментарий по пакету" />
+              <div className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">💬 Комментарий к пакету</div>
+              <textarea className="input-field min-h-[110px]" value={batchComment} onChange={(event) => setBatchComment(event.target.value)} placeholder="Общий комментарий ко всем кадрам пакета (необязательно)" />
             </div>
 
             <button className="btn-primary" type="button" onClick={() => resolveMutation.mutate()} disabled={resolveMutation.isPending}>
-              {resolveMutation.isPending ? "Сохраняем..." : "Сохранить решения по пакету"}
+              {resolveMutation.isPending ? "💾 Сохраняем..." : "✅ Сохранить решения по пакету"}
             </button>
           </>
         )}
       </div>
-
-      {/* Метрики качества
-      {datasetId && (
-        <div className="card">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
-            Метрики качества
-          </h2>
-          {metricsQuery.isLoading ? (
-            <LoadingSpinner />
-          ) : metrics.length === 0 ? (
-            <p className="text-gray-500">Нет метрик для этого датасета</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left">
-                    <th className="py-3 px-2">Задача</th>
-                    <th className="py-3 px-2">Precision</th>
-                    <th className="py-3 px-2">Recall</th>
-                    <th className="py-3 px-2">F1</th>
-                    <th className="py-3 px-2">Дата</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {metrics.map((m: any) => (
-                    <tr key={m.task_id} className="border-b border-gray-100 dark:border-gray-800">
-                      <td className="py-3 px-2 font-mono text-xs">{m.task_id?.slice(0, 8)}...</td>
-                      <td className="py-3 px-2">{m.precision?.toFixed(3)}</td>
-                      <td className="py-3 px-2">{m.recall?.toFixed(3)}</td>
-                      <td className="py-3 px-2 font-semibold">{m.f1?.toFixed(3)}</td>
-                      <td className="py-3 px-2 text-xs text-gray-500">
-                        {m.created_at ? new Date(m.created_at).toLocaleString("ru-RU") : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )} */}
     </div>
   );
 }
