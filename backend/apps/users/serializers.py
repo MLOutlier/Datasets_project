@@ -21,6 +21,7 @@ from .models import User
 
 
 logger = logging.getLogger(__name__)
+JWT_ACCESS_TTL_MINUTES = getattr(settings, 'JWT_ACCESS_TTL_MINUTES', 60)
 
 # JWT настройки из Django settings
 def get_jwt_secret() -> str:
@@ -33,7 +34,7 @@ def get_jwt_algorithm() -> str:
 
 def get_jwt_ttl() -> int:
     """Получить JWT TTL из Django settings."""
-    return getattr(settings, 'JWT_ACCESS_TTL_MINUTES', 60)
+    return JWT_ACCESS_TTL_MINUTES
 
 
 def create_access_token(user: User) -> str:

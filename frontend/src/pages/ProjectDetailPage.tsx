@@ -6,6 +6,7 @@ import { projectsAPI, workflowAPI, dawidSkeneAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
 import { getTaskFlowCopy, getTaskGroupLabel } from "../lib/taskFlowCopy";
+import type { ProjectExportArtifact, ProjectExportArtifactName, ProjectExportFormat } from "../types";
 
 function DawidSkeneQuality({ projectId }: { projectId: string }) {
   const qualityQuery = useQuery({
@@ -159,7 +160,7 @@ export default function ProjectDetailPage() {
   const [instructionFile, setInstructionFile] = useState<File | null>(null);
   const [instructionUploadError, setInstructionUploadError] = useState<string | null>(null);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
-  const [exportFormat, setExportFormat] = useState<"coco" | "yolo" | "voc" | "csv" | "json" | "jsonl" | "both">("both");
+  const [exportFormat, setExportFormat] = useState<ProjectExportFormat>("both");
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [genericTasksInput, setGenericTasksInput] = useState("");
@@ -232,19 +233,26 @@ export default function ProjectDetailPage() {
   });
 
   const exportMutation = useMutation({
-    mutationFn: async () => workflowAPI.export(projectId!, exportFormat),
+    mutationFn: async ({ artifact, format }: { artifact: ProjectExportArtifactName | string; format: ProjectExportFormat }) =>
+      workflowAPI.export(projectId!, format, artifact),
     onSuccess: (payload) => {
       setExportPayload(JSON.stringify(payload, null, 2));
+    },
+    onError: (err: any) => {
+      setArchiveError(err?.response?.data?.detail || err?.message || "Export failed");
     },
   });
 
   const exportArchiveMutation = useMutation({
-    mutationFn: async () => workflowAPI.exportArchive(projectId!, exportFormat),
-    onSuccess: (blob) => {
+    mutationFn: async ({ artifact, format }: { artifact: ProjectExportArtifactName | string; format: ProjectExportFormat }) => {
+      const blob = await workflowAPI.exportArchive(projectId!, format, artifact);
+      return { blob, artifact, format };
+    },
+    onSuccess: ({ blob, artifact, format }) => {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `project-${projectId}-${exportFormat}.zip`;
+      anchor.download = `project-${projectId}-${artifact}-${format}.zip`;
       anchor.click();
       URL.revokeObjectURL(url);
       setArchiveError(null);
@@ -356,25 +364,56 @@ export default function ProjectDetailPage() {
   const lastUploadPreview = uploadMutation.data?.preview;
   const readyImportId = activeImportId || String(overview?.imports?.latest_ready_import_id || "");
   const hasVideoAssets = Array.isArray(overview?.imports?.video_asset_ids) && overview.imports.video_asset_ids.length > 0;
+  const overviewAny = overview as any;
+  const genericTotal = Number(overviewAny?.generic_tasks?.total || genericTasksQuery.data?.summary?.total || 0);
+  const genericCompleted = Number(overviewAny?.generic_tasks?.completed || genericTasksQuery.data?.summary?.completed || 0);
   const totalWorkItems = Number(overview?.work_items?.total || 0);
   const completedWorkItems = Number(overview?.work_items?.completed || 0);
-  const approvedExportItems = Number((overview?.work_items as any)?.validation_approved || 0);
+  const approvedExportItems = isGenericTask ? genericCompleted : Number((overview?.work_items as any)?.validation_approved || 0);
   const validationPendingItems = Number((overview?.work_items as any)?.validation_pending || 0);
   const validationDisputedItems = Number((overview?.work_items as any)?.validation_disputed || 0);
   const insufficientAnnotatorItems = Number((overview?.work_items as any)?.insufficient_annotators || 0);
   const insufficientValidatorItems = Number((overview?.work_items as any)?.insufficient_validators || 0);
-  const exportBlockedItems = Math.max(0, totalWorkItems - approvedExportItems);
-  const exportReadyPercent = totalWorkItems > 0 ? Math.round((approvedExportItems / totalWorkItems) * 100) : 0;
+  const exportTotalItems = isGenericTask ? genericTotal : totalWorkItems;
+  const exportBlockedItems = Math.max(0, exportTotalItems - approvedExportItems);
+  const exportReadyPercent = exportTotalItems > 0 ? Math.round((approvedExportItems / exportTotalItems) * 100) : 0;
   const exportReady = approvedExportItems > 0;
+  const backendExportArtifacts = Array.isArray(overview?.export?.artifacts) ? overview.export.artifacts : [];
+  const exportArtifacts: ProjectExportArtifact[] = isGenericTask
+    ? [
+        {
+          artifact: "validated_dataset",
+          title: "Ответы проекта",
+          ready: genericCompleted > 0,
+          items_count: genericCompleted,
+          quality_level: "project_result",
+          validated: false,
+          message: genericCompleted > 0 ? "" : "Экспорт станет содержательным после появления хотя бы одного завершенного задания.",
+          formats: ["json", "jsonl", "csv", "both"],
+        },
+      ]
+    : backendExportArtifacts;
+  const exportArtifactFormat = (artifact: ProjectExportArtifact): ProjectExportFormat => {
+    const formats = (artifact.formats || []) as string[];
+    if (formats.includes(exportFormat)) return exportFormat;
+    return "both";
+  };
+  const previewArtifact = (artifact: ProjectExportArtifact) => {
+    setArchiveError(null);
+    exportMutation.mutate({ artifact: artifact.artifact, format: exportArtifactFormat(artifact) });
+  };
+  const downloadArtifact = (artifact: ProjectExportArtifact) => {
+    setArchiveError(null);
+    exportArchiveMutation.mutate({ artifact: artifact.artifact, format: exportArtifactFormat(artifact) });
+  };
   const goldenCandidates = goldenCandidatesQuery.data?.items ?? [];
   const goldenActiveCount = Number(goldenCandidatesQuery.data?.active_count ?? 0);
   const goldenCandidateCount = Number(goldenCandidatesQuery.data?.candidate_count ?? 0);
   const goldenRetiredCount = Number(goldenCandidatesQuery.data?.retired_count ?? 0);
-  const overviewAny = overview as any;
   const bboxValidationAssigned = Number(overviewAny?.bbox_validation?.assigned || 0);
   const canDeleteProject = user?.role === "admin" || (user?.role === "customer" && projectQuery.data?.owner_id === user.id);
   const sourceSync = overview?.source_sync;
-  const readinessGates = [
+  const fallbackReadinessGates = [
     { label: "Импорт готов", ready: Number(overview?.imports?.ready || 0) > 0 || Number(overview?.imports?.finalized || 0) > 0 },
     { label: "Интервалы размечаются", ready: Number(overviewAny?.intervals?.total || 0) > 0 || Number(overviewAny?.intervals?.validation_assigned || 0) > 0 },
     { label: "Интервалы валидируются", ready: Number(overviewAny?.intervals?.validation_assigned || 0) > 0 || Number(overviewAny?.intervals?.approved || 0) > 0 },
@@ -382,10 +421,13 @@ export default function ProjectDetailPage() {
     { label: "BBox-валидация идет", ready: Number(overviewAny?.bbox_validation?.assigned || 0) > 0 || Number((overview?.work_items as any)?.validation_pending || 0) > 0 },
     { label: "Экспорт доступен", ready: exportReady },
   ];
+  const readinessGates = overview?.readiness_gates?.length ? overview.readiness_gates : fallbackReadinessGates;
+  const nextAction = overview?.next_action;
 
   const completion = useMemo(() => {
+    if (isGenericTask) return genericTotal > 0 ? Math.round((genericCompleted / genericTotal) * 100) : 0;
     return totalWorkItems > 0 ? Math.round((completedWorkItems / totalWorkItems) * 100) : 0;
-  }, [completedWorkItems, totalWorkItems]);
+  }, [completedWorkItems, genericCompleted, genericTotal, isGenericTask, totalWorkItems]);
 
   if (projectQuery.isLoading) {
     return <LoadingSpinner size="lg" />;
@@ -396,11 +438,11 @@ export default function ProjectDetailPage() {
     return (
       <div className="space-y-4">
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
-          Project not found.
+          Проект не найден.
         </div>
         <div className="flex flex-wrap gap-3">
           <Link to="/projects" className="btn-secondary">
-            Back to projects
+            К проектам
           </Link>
           {canTryDeleteMissingProject && projectId ? (
             <button
@@ -408,12 +450,12 @@ export default function ProjectDetailPage() {
               className="btn-secondary border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950"
               disabled={deleteProjectMutation.isPending}
               onClick={() => {
-                if (window.confirm("Remove this unavailable project from your workspace?")) {
+                if (window.confirm("Удалить недоступный проект из рабочего пространства?")) {
                   deleteProjectMutation.mutate();
                 }
               }}
             >
-              {deleteProjectMutation.isPending ? "Deleting..." : "Delete project"}
+              {deleteProjectMutation.isPending ? "Удаляем..." : "Удалить проект"}
             </button>
           ) : null}
         </div>
@@ -441,18 +483,8 @@ export default function ProjectDetailPage() {
               Интервалы
             </Link>
           ) : null}
-          {!isGenericTask ? (
-            <>
-              <button className="btn-secondary" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}>
-                {exportMutation.isPending ? "Exporting..." : exportReady ? "Export dataset" : "Export report"}
-              </button>
-              <button className="btn-secondary" onClick={() => exportArchiveMutation.mutate()} disabled={exportArchiveMutation.isPending}>
-                {exportArchiveMutation.isPending ? "Preparing zip..." : exportReady ? "Download zip" : "Download report zip"}
-              </button>
-            </>
-          ) : null}
           <button className="btn-secondary" onClick={() => syncWorkflowMutation.mutate()} disabled={syncWorkflowMutation.isPending}>
-            {syncWorkflowMutation.isPending ? "Syncing..." : "Sync workflow"}
+            {syncWorkflowMutation.isPending ? "Синхронизируем..." : "Синхронизировать"}
           </button>
           {canDeleteProject ? (
             <button
@@ -464,12 +496,18 @@ export default function ProjectDetailPage() {
               }}
               disabled={deleteProjectMutation.isPending}
             >
-              {deleteProjectMutation.isPending ? "Deleting..." : "Delete project"}
+              {deleteProjectMutation.isPending ? "Удаляем..." : "Удалить проект"}
             </button>
           ) : null}
         </div>
       </div>
       {deleteError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{deleteError}</div> : null}
+
+      {nextAction ? (
+        <div className={`rounded-lg border p-4 text-sm ${nextAction.severity === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100" : nextAction.severity === "warning" ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100" : "border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100"}`}>
+          Следующий шаг: {nextAction.route ? <Link className="font-semibold underline" to={nextAction.route}>{nextAction.label}</Link> : <span className="font-semibold">{nextAction.label}</span>}
+        </div>
+      ) : null}
 
       {projectQuery.data.source_project_id ? (
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-100">
@@ -496,13 +534,13 @@ export default function ProjectDetailPage() {
         <div className="card space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Generic task setup</h2>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Задания для этого проекта</h2>
               <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-                Создайте legacy Task-задания для этого проекта. Можно вставить строки вручную или загрузить CSV с колонками title, prompt, input_ref, option_a, option_b.
+                Добавьте задания вручную или загрузите CSV с колонками title, prompt, input_ref, option_a, option_b.
               </p>
             </div>
             <div className="text-sm text-gray-500 dark:text-gray-400">
-              Total: {Number(genericTasksQuery.data?.summary?.total || 0)} · Pending: {Number(genericTasksQuery.data?.summary?.pending || 0)} · Review: {Number(genericTasksQuery.data?.summary?.review || 0)}
+              Всего: {Number(genericTasksQuery.data?.summary?.total || 0)} · Ожидают: {Number(genericTasksQuery.data?.summary?.pending || 0)} · На проверке: {Number(genericTasksQuery.data?.summary?.review || 0)}
             </div>
           </div>
           <textarea
@@ -525,13 +563,13 @@ export default function ProjectDetailPage() {
               disabled={createGenericTasksMutation.isPending || (!genericTasksInput.trim() && !genericTasksFile)}
               onClick={() => createGenericTasksMutation.mutate()}
             >
-              {createGenericTasksMutation.isPending ? "Creating..." : "Create generic tasks"}
+              {createGenericTasksMutation.isPending ? "Создаём..." : "Создать задания"}
             </button>
           </div>
           {genericTasksError ? <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{genericTasksError}</div> : null}
           {createGenericTasksMutation.data ? (
             <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">
-              Created {createGenericTasksMutation.data.created}, skipped {createGenericTasksMutation.data.skipped}, total {createGenericTasksMutation.data.total}.
+              Создано: {createGenericTasksMutation.data.created}, пропущено дублей: {createGenericTasksMutation.data.skipped}, всего: {createGenericTasksMutation.data.total}.
             </div>
           ) : null}
         </div>
@@ -539,48 +577,114 @@ export default function ProjectDetailPage() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
         <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Frames</div>
+          <div className="text-sm text-gray-500 dark:text-gray-400">Кадры</div>
           <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{Number(overview?.imports?.frames_total ?? 0)}</div>
         </div>
         <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Work items</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{totalWorkItems}</div>
+          <div className="text-sm text-gray-500 dark:text-gray-400">{isGenericTask ? "Задания" : "Work items"}</div>
+          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{isGenericTask ? genericTotal : totalWorkItems}</div>
         </div>
         <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Export ready</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{approvedExportItems}/{totalWorkItems}</div>
-          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{exportReadyPercent}% validated</div>
+          <div className="text-sm text-gray-500 dark:text-gray-400">Готово к экспорту</div>
+          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{approvedExportItems}/{exportTotalItems}</div>
+          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{exportReadyPercent}% готово</div>
         </div>
         <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Low-agreement requeue</div>
+          <div className="text-sm text-gray-500 dark:text-gray-400">Повторная разметка</div>
           <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{Number(overview?.assignments?.disputed ?? 0)}</div>
         </div>
         <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Completion</div>
+          <div className="text-sm text-gray-500 dark:text-gray-400">Завершение</div>
           <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{completion}%</div>
         </div>
       </div>
 
-      <div className={`rounded-lg border p-4 ${exportReadyPercent >= 80 ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100" : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100"}`}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="card space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold">Dataset export readiness</div>
-            <div className="mt-1 text-xs">
-              Export includes only approved bbox validation items. Annotation completion is {completion}%, but validated export readiness is {exportReadyPercent}%.
-            </div>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Результаты проекта</h2>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+              Каждый проект экспортирует собственный результат. Только проверенный датасет считается финальной выгрузкой для обучения модели.
+            </p>
           </div>
-          <div className="text-right text-sm">
-            <div className="font-semibold">{approvedExportItems} included / {exportBlockedItems} excluded</div>
-            <div className="text-xs opacity-80">pending {validationPendingItems}, disputed {validationDisputedItems}, insufficient {insufficientAnnotatorItems + insufficientValidatorItems}</div>
-          </div>
+          <select
+            className="input-field w-auto"
+            value={exportFormat}
+            onChange={(event) => setExportFormat(event.target.value as ProjectExportFormat)}
+          >
+            <option value="both">Формат: все доступные</option>
+            <option value="json">JSON</option>
+            <option value="jsonl">JSONL</option>
+            <option value="csv">CSV</option>
+            {!isGenericTask ? <option value="coco">COCO</option> : null}
+            {!isGenericTask ? <option value="yolo">YOLO</option> : null}
+            {!isGenericTask ? <option value="voc">Pascal VOC</option> : null}
+          </select>
         </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-4">
+          {exportArtifacts.map((artifact) => {
+            const isValidatedDataset = artifact.artifact === "validated_dataset";
+            const effectiveFormat = exportArtifactFormat(artifact);
+            return (
+              <div
+                key={artifact.artifact}
+                className={`rounded-lg border p-4 ${
+                  artifact.ready
+                    ? "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950"
+                    : "border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-semibold text-gray-900 dark:text-white">{artifact.title}</div>
+                    <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      {artifact.items_count} элементов · {artifact.quality_level}
+                    </div>
+                  </div>
+                  <span className={`rounded px-2 py-1 text-xs font-medium ${artifact.ready ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-100" : "bg-gray-200 text-gray-600 dark:bg-gray-800 dark:text-gray-300"}`}>
+                    {artifact.ready ? "Доступно" : "Ожидает"}
+                  </span>
+                </div>
+                {!isValidatedDataset ? (
+                  <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+                    Этот экспорт не является финальным проверенным датасетом.
+                  </div>
+                ) : null}
+                {!artifact.ready && artifact.message ? (
+                  <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">{artifact.message}</div>
+                ) : null}
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={exportMutation.isPending}
+                    onClick={() => previewArtifact(artifact)}
+                  >
+                    {exportMutation.isPending ? "Готовим..." : `Preview ${effectiveFormat}`}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={exportArchiveMutation.isPending}
+                    onClick={() => downloadArtifact(artifact)}
+                  >
+                    {exportArchiveMutation.isPending ? "ZIP..." : "Скачать ZIP"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {archiveError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{archiveError}</div> : null}
       </div>
 
       <div className="card space-y-4">
         <div>
           <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Готовность workflow</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-            Выгрузка включает только кадры с завершенной bbox-разметкой и подтвержденной bbox-валидацией.
+            Пользователь всегда видит, какой этап готов и что нужно сделать дальше.
           </p>
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -593,7 +697,7 @@ export default function ProjectDetailPage() {
         </div>
         {!exportReady ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
-            Экспорт станет доступен после появления хотя бы одного `validation_approved` кадра.
+            {isGenericTask ? "Экспорт станет содержательным после появления хотя бы одного завершённого задания." : "Экспорт станет доступен после появления хотя бы одного подтверждённого кадра."}
             <div className="mt-2">
               Сейчас: ожидает bbox-валидации {validationPendingItems}, назначено пакетов валидации {bboxValidationAssigned}, спорных {validationDisputedItems}, нехватка исполнителей {insufficientAnnotatorItems}, нехватка валидаторов {insufficientValidatorItems}.
             </div>
@@ -604,7 +708,7 @@ export default function ProjectDetailPage() {
         ) : null}
         {syncWorkflowMutation.data?.sync ? (
           <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-100">
-            Sync complete: bbox assignments created {syncWorkflowMutation.data.sync.bbox_annotation_created}, interval assignments created {syncWorkflowMutation.data.sync.interval_annotation_created}, evaluated {syncWorkflowMutation.data.sync.evaluated_items}, bbox validation batches created {syncWorkflowMutation.data.sync.bbox_validation_created}.
+            Синхронизация завершена: bbox assignments {syncWorkflowMutation.data.sync.bbox_annotation_created ?? 0}, interval assignments {syncWorkflowMutation.data.sync.interval_annotation_created ?? 0}, evaluated {syncWorkflowMutation.data.sync.evaluated_items ?? 0}, bbox validation batches {syncWorkflowMutation.data.sync.bbox_validation_created ?? 0}.
           </div>
         ) : null}
       </div>
@@ -713,8 +817,43 @@ export default function ProjectDetailPage() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr,0.8fr]">
+      {isValidationTask ? (
         <div className="card space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Source project sync</h2>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+                This validation project materializes tasks from the selected source project. Re-running sync is safe and skips already imported source items.
+              </p>
+            </div>
+            <button className="btn-primary" type="button" onClick={() => syncWorkflowMutation.mutate()} disabled={syncWorkflowMutation.isPending}>
+              {syncWorkflowMutation.isPending ? "Syncing..." : "Sync source"}
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+            <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Status</div>
+              <div className="mt-1 font-semibold text-gray-900 dark:text-white">{sourceSync?.status || "not_synced"}</div>
+            </div>
+            <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Created</div>
+              <div className="mt-1 font-semibold text-gray-900 dark:text-white">{sourceSync?.created ?? 0}</div>
+            </div>
+            <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Skipped</div>
+              <div className="mt-1 font-semibold text-gray-900 dark:text-white">{sourceSync?.skipped ?? 0}</div>
+            </div>
+            <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Assigned</div>
+              <div className="mt-1 font-semibold text-gray-900 dark:text-white">{taskType === "bbox_validation" ? bboxValidationAssigned : Number(overviewAny?.intervals?.validation_assigned || 0)}</div>
+            </div>
+          </div>
+          {sourceSync?.errors?.length ? <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{sourceSync.errors.join("; ")}</div> : null}
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr,0.8fr]">
+        {!isValidationTask ? <div className="card space-y-4">
           <div>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">{taskCopy.importTitle}</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
@@ -746,19 +885,6 @@ export default function ProjectDetailPage() {
             <button className="btn-secondary" type="button" onClick={() => finalizeMutation.mutate()} disabled={!canUploadMedia || !readyImportId || finalizeMutation.isPending}>
               {finalizeMutation.isPending ? "Finalizing..." : "Finalize import"}
             </button>
-            <select
-              className="input-field w-auto"
-              value={exportFormat}
-              onChange={(event) => setExportFormat(event.target.value as "coco" | "yolo" | "voc" | "csv" | "json" | "jsonl" | "both")}
-            >
-              {isGenericTask ? <option value="both">Export: JSON + JSONL + CSV</option> : <option value="both">Export: COCO + YOLO + VOC + CSV</option>}
-              {isGenericTask ? <option value="json">Export: JSON</option> : null}
-              {isGenericTask ? <option value="jsonl">Export: JSONL</option> : null}
-              {!isGenericTask ? <option value="coco">Export: COCO</option> : null}
-              {!isGenericTask ? <option value="yolo">Export: YOLO</option> : null}
-              {!isGenericTask ? <option value="voc">Export: VOC</option> : null}
-              <option value="csv">Export: CSV</option>
-            </select>
           </div>
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
             {hasVideoAssets
@@ -789,8 +915,7 @@ export default function ProjectDetailPage() {
               {lastUploadPreview.errors.length > 0 ? <div className="mt-2">Errors: {lastUploadPreview.errors.join("; ")}</div> : null}
             </div>
           ) : null}
-          {archiveError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{archiveError}</div> : null}
-        </div>
+        </div> : null}
 
         <div className="card space-y-4">
           <div>

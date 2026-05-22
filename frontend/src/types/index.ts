@@ -200,6 +200,11 @@ export interface TaskTypeSpec {
   input_modes: string[];
   export_formats: string[];
   executor_route: string;
+  data_source?: string;
+  materializer?: string;
+  quality_strategy?: string;
+  readiness_gates?: string[];
+  result_schema?: Record<string, unknown>;
   ui_hints: Record<string, unknown>;
   widget_config?: {
     widget_type: ProjectWidgetType;
@@ -240,6 +245,7 @@ export interface ProjectParticipantRules {
   ai_confidence_threshold?: number;
   video_keyframe_interval?: number;
   tracking_algorithm?: string;
+  quality_strategy?: string;
   task_batch_size?: number;
   min_sequence_size?: number;
   interval_annotators_per_chunk?: number;
@@ -399,6 +405,18 @@ export interface ProjectOverview {
     source_project_id?: string | null;
     source_project_title?: string;
   };
+  task_contract?: TaskTypeSpec | Record<string, unknown>;
+  readiness_gates?: Array<{
+    key: string;
+    label: string;
+    ready: boolean;
+  }>;
+  next_action?: {
+    key: string;
+    label: string;
+    route?: string;
+    severity?: "success" | "info" | "warning" | string;
+  };
   imports: Record<string, unknown>;
   source_sync?: {
     required: boolean;
@@ -412,6 +430,16 @@ export interface ProjectOverview {
     source_project_title?: string;
   };
   work_items: Record<string, unknown>;
+  export?: {
+    ready_items?: number;
+    blocked_items?: number;
+    readiness_rate?: number;
+    pending_validation_items?: number;
+    disputed_items?: number;
+    insufficient_items?: number;
+    artifacts?: ProjectExportArtifact[];
+    [key: string]: unknown;
+  };
   assignments: Record<string, unknown>;
   reviews: Record<string, unknown>;
   sync?: {
@@ -453,6 +481,25 @@ export interface QueueItem {
   instruction: string;
   label_schema: ProjectLabel[];
   created_at: string;
+}
+
+export type ProjectExportArtifactName =
+  | "raw_annotations"
+  | "consensus_annotations"
+  | "validated_dataset"
+  | "validation_report";
+
+export type ProjectExportFormat = "coco" | "yolo" | "voc" | "tfrecord" | "csv" | "json" | "jsonl" | "both";
+
+export interface ProjectExportArtifact {
+  artifact: ProjectExportArtifactName | string;
+  title: string;
+  ready: boolean;
+  items_count: number;
+  quality_level: "raw" | "consensus" | "validated" | "validation_report" | string;
+  validated: boolean;
+  message: string;
+  formats: ProjectExportFormat[] | string[];
 }
 
 export interface IntervalQueueItem {
@@ -717,12 +764,16 @@ export interface ReviewResolveResponse {
 }
 
 export interface ProjectExportPayload {
+  export_version?: number;
+  generated_at?: string;
   project: {
     id: string;
     title: string;
     annotation_type: string;
     task_type?: string;
     widget_type?: string;
+    artifact?: string;
+    export_format?: string;
   };
   quality_report: Record<string, unknown>;
   manifest?: Array<Record<string, unknown>>;

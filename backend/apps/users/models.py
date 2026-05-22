@@ -15,7 +15,7 @@ from datetime import datetime
 from django.conf import settings
 from mongoengine import (
     BooleanField, DateTimeField, Document, DecimalField, EmailField,
-    FloatField, StringField, ListField
+    FloatField, IntField, StringField, ListField
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,8 @@ class User(Document):
 
     # Рейтинг исполнителя (обновляется после QC-арбитража/метрик).
     rating = FloatField(default=0.0)
+    completed_assignments = IntField(default=0, min_value=0)
+    conflict_rate = FloatField(default=0.0, min_value=0.0, max_value=1.0)
 
     # Баланс пользователя для выплат/расчетов (обновляется атомарными $inc в finance).
     balance = DecimalField(default=0, precision=20, rounding=None)

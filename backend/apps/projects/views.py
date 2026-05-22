@@ -31,6 +31,7 @@ from .services.generic_tasks import (
     validate_generic_submission,
 )
 from .services.instructions_upload import InstructionUploadError, save_project_instruction
+from .services.materializer import ProjectTaskMaterializer
 from .export_utils import export_project_dataset
 from .task_registry import task_type_registry_payload
 
@@ -95,9 +96,7 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
     def _sync_cv_workflow(self, project: Project) -> None:
         if project.project_type != Project.TYPE_CV:
             return
-        from apps.cv_annotation.services.workflow import sync_project_workflow
-
-        sync_project_workflow(project)
+        ProjectTaskMaterializer(project).sync()
 
     def get_queryset_for_user(self, user: User):
         if user.role in (User.ROLE_ADMIN,):
@@ -149,6 +148,24 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         serializer.is_valid(raise_exception=True)
         project = serializer.create(serializer.validated_data)
         self._sync_cv_workflow(project)
+        try:
+            from apps.cv_annotation.models import SecurityEvent
+            from apps.cv_annotation.services.security import log_security_event
+
+            log_security_event(
+                project=project,
+                actor=user,
+                event_type="project_created",
+                payload={
+                    "task_type": getattr(project, "task_type", ""),
+                    "widget_type": getattr(project, "widget_type", ""),
+                    "project_type": project.project_type,
+                    "annotation_type": project.annotation_type,
+                },
+                severity="info",
+            )
+        except Exception:
+            pass
         return Response(ProjectSerializer(project, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     def retrieve(self, request, pk: str = None, *args, **kwargs) -> Response:
@@ -336,8 +353,16 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
                 items = [line.strip() for line in stripped.splitlines() if line.strip()]
         if not isinstance(items, list) or not items:
             return Response({"detail": "Provide non-empty items list or CSV file"}, status=status.HTTP_400_BAD_REQUEST)
-        result = create_generic_tasks_from_items(project, items)
-        return Response({"summary": generic_task_summary(project), **result}, status=status.HTTP_201_CREATED)
+        materialized = ProjectTaskMaterializer(project).materialize_generic_items(items)
+        result = materialized.summary or {}
+        return Response(
+            {
+                "summary": generic_task_summary(project),
+                **result,
+                "materialization": materialized.to_dict(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["post"], url_path="participants/import-csv")
     def participants_import_csv(self, request, pk: str = None, *args, **kwargs) -> Response:

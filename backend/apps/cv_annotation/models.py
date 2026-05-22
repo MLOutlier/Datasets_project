@@ -11,6 +11,7 @@ from mongoengine import (
     FloatField,
     IntField,
     ListField,
+    QuerySet,
     ReferenceField,
     StringField,
 )
@@ -348,6 +349,14 @@ class Assignment(Document):
         return super().save(*args, **kwargs)
 
 
+class WorkAnnotationQuerySet(QuerySet):
+    def __call__(self, q_obj=None, **query):
+        project = query.pop("work_item__project", None)
+        if project is not None:
+            query["work_item__in"] = list(WorkItem.objects(project=project).scalar("id"))
+        return super().__call__(q_obj=q_obj, **query)
+
+
 class WorkAnnotation(Document):
     STATUS_DRAFT = "draft"
     STATUS_SUBMITTED = "submitted"
@@ -368,6 +377,7 @@ class WorkAnnotation(Document):
     meta = {
         "collection": "cv_work_annotations",
         "indexes": ["work_item", "annotator", "status"],
+        "queryset_class": WorkAnnotationQuerySet,
     }
 
     def save(self, *args, **kwargs):

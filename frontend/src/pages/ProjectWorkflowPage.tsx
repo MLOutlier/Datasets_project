@@ -57,6 +57,7 @@ function normalizeParticipantRules(rules?: ProjectParticipantRules): Required<Pr
     ai_confidence_threshold: Number(rules?.ai_confidence_threshold ?? 0.7),
     video_keyframe_interval: Number(rules?.video_keyframe_interval ?? 1),
     tracking_algorithm: String(rules?.tracking_algorithm ?? "CSRT"),
+    quality_strategy: String(rules?.quality_strategy ?? "consensus"),
     task_batch_size: Number(rules?.task_batch_size ?? 10),
     min_sequence_size: Number(rules?.min_sequence_size ?? 3),
     interval_annotators_per_chunk: Number(rules?.interval_annotators_per_chunk ?? 1),

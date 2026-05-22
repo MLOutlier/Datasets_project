@@ -18,6 +18,8 @@ import {
   Participant,
   PaymentRequestBody,
   Project,
+  ProjectExportArtifactName,
+  ProjectExportFormat,
   ProjectExportPayload,
   ProjectFinalizeResponse,
   ProjectImportResponse,
@@ -265,13 +267,13 @@ export const workflowAPI = {
     const res = await api.post<ProjectOverview>(`/api/projects/${projectId}/workflow/sync/`, {});
     return res.data;
   },
-  async export(projectId: string, format: "coco" | "yolo" | "voc" | "tfrecord" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<ProjectExportPayload> {
-    const res = await api.get<ProjectExportPayload>(`/api/cv/projects/${projectId}/export/`, { params: { format } });
+  async export(projectId: string, format: ProjectExportFormat = "both", artifact: ProjectExportArtifactName | string = "validated_dataset"): Promise<ProjectExportPayload> {
+    const res = await api.get<ProjectExportPayload>(`/api/cv/projects/${projectId}/export/`, { params: { format, artifact } });
     return res.data;
   },
-  async exportArchive(projectId: string, format: "coco" | "yolo" | "voc" | "tfrecord" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<Blob> {
+  async exportArchive(projectId: string, format: ProjectExportFormat = "both", artifact: ProjectExportArtifactName | string = "validated_dataset"): Promise<Blob> {
     const res = await api.get(`/api/cv/projects/${projectId}/export/`, {
-      params: { format, download: "1" },
+      params: { format, artifact, download: "1" },
       responseType: "blob",
     });
     return res.data as Blob;

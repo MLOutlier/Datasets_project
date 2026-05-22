@@ -14,6 +14,7 @@ from apps.projects.services.generic_tasks import (
     build_generic_project_export_archive,
     is_generic_task_project,
 )
+from apps.projects.services.materializer import ProjectTaskMaterializer
 from apps.projects.task_registry import (
     TASK_BBOX_ANNOTATION,
     TASK_BBOX_VALIDATION,
@@ -59,7 +60,6 @@ from .services.workflow import (
     build_dataset_export,
     build_import_preview,
     bbox_validation_queue_for_annotator,
-    create_work_items_for_import,
     ensure_bbox_validation_assignments,
     ensure_interval_validation_assignments,
     generate_auto_intervals_for_asset,
@@ -82,7 +82,6 @@ from .services.workflow import (
     validator_interval_queue,
     resolve_validation_batch,
     save_assignment_annotation,
-    sync_project_workflow,
     upsert_video_intervals,
     validate_video_intervals,
     validation_batch_detail,
@@ -213,15 +212,14 @@ class ProjectImportFinalizeView(AuthenticatedAPIView):
         import_session = ImportSession.objects(id=ObjectId(import_id), project=project).first()
         if not import_session:
             return Response({"detail": "Import session not found"}, status=status.HTTP_404_NOT_FOUND)
-        if getattr(project, "task_type", "") == TASK_IMAGE_ANNOTATION:
-            from apps.projects.services.generic_tasks import create_image_tasks_from_import
-
-            summary = create_image_tasks_from_import(import_session)
-            import_session.summary = summary
-            import_session.status = ImportSession.STATUS_FINALIZED
-            import_session.save()
-        else:
-            summary = create_work_items_for_import(import_session)
+        result = ProjectTaskMaterializer(project).materialize_import(import_session)
+        summary = result.summary or {}
+        log_security_event(
+            project=project,
+            actor=user,
+            event_type="import_finalized",
+            payload={"import_id": str(import_session.id), **result.to_dict()},
+        )
         return Response(
             {
                 "import_id": str(import_session.id),
@@ -255,7 +253,19 @@ class ProjectWorkflowSyncView(AuthenticatedAPIView):
         project = self.get_project_for_user(user, project_id, require_owner=True)
         if not project:
             return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(sync_project_workflow(project), status=status.HTTP_200_OK)
+        overview = ProjectTaskMaterializer(project).sync()
+        log_security_event(
+            project=project,
+            actor=user,
+            event_type="workflow_synced",
+            payload={
+                "task_type": getattr(project, "task_type", ""),
+                "widget_type": getattr(project, "widget_type", ""),
+                "sync": overview.get("sync", {}),
+                "source_sync": overview.get("source_sync", {}),
+            },
+        )
+        return Response(overview, status=status.HTTP_200_OK)
 
 
 class ProjectVideoIntervalsView(AuthenticatedAPIView):
@@ -638,6 +648,10 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
                 "route": lambda project_id: f"/labeling/generic/{project_id}",
             },
         }
+        stage_api_names = {
+            TASK_VIDEO_ANNOTATION: "interval_annotation",
+            TASK_VIDEO_INTERVAL_VALIDATION: "interval_validation",
+        }
 
         projects: dict[str, Project] = {}
 
@@ -648,12 +662,13 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
         def base_stage(project: Project, stage: str, last_activity_at=None) -> dict:
             project_id = str(project.id)
             spec = stage_specs[stage]
+            api_stage = stage_api_names.get(stage, stage)
             return {
-                "stage_project_id": f"{project_id}:{stage}",
+                "stage_project_id": f"{project_id}:{api_stage}",
                 "parent_project_id": project_id,
                 "project_id": project_id,
                 "project_title": spec["title"],
-                "stage": stage,
+                "stage": api_stage,
                 "task_type": getattr(project, "task_type", "bbox_annotation") or "bbox_annotation",
                 "widget_type": getattr(project, "widget_type", "bbox") or "bbox",
                 "stage_title": spec["title"],
@@ -683,6 +698,22 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
             }
 
         grouped: dict[str, dict[str, dict]] = {}
+        cv_pipeline_stages = [
+            TASK_VIDEO_ANNOTATION,
+            TASK_VIDEO_INTERVAL_VALIDATION,
+            TASK_BBOX_ANNOTATION,
+            TASK_BBOX_VALIDATION,
+        ]
+
+        def display_stages_for_project(project: Project) -> list[str]:
+            task_type = getattr(project, "task_type", TASK_BBOX_ANNOTATION) or TASK_BBOX_ANNOTATION
+            if (
+                getattr(project, "project_type", "") == Project.TYPE_CV
+                and getattr(project, "annotation_type", "") == Project.ANNOTATION_BBOX
+                and task_type == TASK_BBOX_ANNOTATION
+            ):
+                return cv_pipeline_stages
+            return [task_type if task_type in stage_specs else TASK_BBOX_ANNOTATION]
 
         def ensure_stage(project: Project, stage: str, last_activity_at=None) -> dict:
             project = remember_project(project)
@@ -699,12 +730,12 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
         if user.role == User.ROLE_ANNOTATOR:
             memberships = ProjectMembership.objects(user=user, role=ProjectMembership.ROLE_ANNOTATOR, is_active=True)
             for membership in memberships:
-                stage = getattr(membership.project, "task_type", TASK_BBOX_ANNOTATION) or TASK_BBOX_ANNOTATION
-                ensure_stage(membership.project, stage if stage in stage_specs else TASK_BBOX_ANNOTATION, membership.updated_at or membership.created_at)
+                for stage in display_stages_for_project(membership.project):
+                    ensure_stage(membership.project, stage, membership.updated_at or membership.created_at)
         else:
             for project in Project.objects:
-                stage = getattr(project, "task_type", TASK_BBOX_ANNOTATION) or TASK_BBOX_ANNOTATION
-                ensure_stage(project, stage if stage in stage_specs else TASK_BBOX_ANNOTATION, project.updated_at or project.created_at)
+                for stage in display_stages_for_project(project):
+                    ensure_stage(project, stage, project.updated_at or project.created_at)
 
         assignments = list(
             Assignment.objects(annotator=user).order_by("queue_position", "-updated_at", "-created_at")
@@ -810,9 +841,36 @@ class AnnotatorProjectsView(AuthenticatedAPIView):
         available_projects = []
         active_projects = []
         completed_projects = []
+        project_has_open_work: dict[str, bool] = {}
+        for project_id, stages in grouped.items():
+            project_has_open_work[project_id] = any(
+                bucket["available_count"] > 0
+                or bucket["active_count"] > 0
+                or bucket["draft_count"] > 0
+                for bucket in stages.values()
+            )
+
         for project_id, stages in grouped.items():
             project = projects.get(project_id)
             for stage, bucket in stages.items():
+                has_stage_history = any(
+                    bucket[key] > 0
+                    for key in [
+                        "available_count",
+                        "active_count",
+                        "draft_count",
+                        "submitted_count",
+                        "accepted_count",
+                        "rejected_count",
+                        "completed_count",
+                        "interval_chunk_count",
+                        "interval_validation_count",
+                        "bbox_validation_count",
+                        "total_assignments",
+                    ]
+                )
+                if not has_stage_history and not project_has_open_work.get(project_id, False):
+                    continue
                 pipeline_pending = False
                 if project:
                     if stage == TASK_VIDEO_ANNOTATION:
