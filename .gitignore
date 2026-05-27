@@ -76,6 +76,11 @@ secrets.yaml
 *.sublime-workspace
 .qwen
 .vexp
+.vexpignore
+.codex
+.github
+.agents
+AGENTS.md
 
 # =============================================================================
 # OS Files

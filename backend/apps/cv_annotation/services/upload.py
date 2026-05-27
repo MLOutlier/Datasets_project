@@ -48,12 +48,15 @@ def _safe_name(filename: str) -> str:
 def save_project_file(file_obj, project_id: str, import_id: str) -> Dict[str, str]:
     asset_type = validate_upload(file_obj)
     target_dir = UPLOAD_ROOT / project_id / import_id
-    target_dir.mkdir(parents=True, exist_ok=True)
     stored_name = _safe_name(file_obj.name)
     target_path = target_dir / stored_name
-    with open(target_path, "wb+") as destination:
-        for chunk in file_obj.chunks():
-            destination.write(chunk)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with open(target_path, "wb+") as destination:
+            for chunk in file_obj.chunks():
+                destination.write(chunk)
+    except OSError as exc:
+        raise UploadValidationError("Upload storage is not writable. Check MEDIA_ROOT permissions.") from exc
     mime_type, _ = mimetypes.guess_type(file_obj.name)
     return {
         "asset_type": asset_type,

@@ -183,6 +183,11 @@ class ProjectImportView(AuthenticatedAPIView):
             payload = save_project_file(request.FILES["file"], str(project.id), str(import_session.id))
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except OSError:
+            return Response(
+                {"detail": "Upload storage is not writable. Check MEDIA_ROOT permissions."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         asset = ImportAsset(
             import_session=import_session,
             project=project,

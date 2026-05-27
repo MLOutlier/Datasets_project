@@ -1,200 +1,92 @@
-import { Group, Image as KonvaImage, Layer, Rect, Stage, Text } from "react-konva";
+import {
+  Group,
+  Image as KonvaImage,
+  Layer,
+  Rect,
+  Stage,
+  Text,
+} from "react-konva";
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { BoundingBox, ProjectLabel } from "../types";
 
-// ============================================================
-// HOOK: Image Loader
-// ============================================================
 function useImageLoader(url: string) {
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!url) { setLoading(false); return; }
+    if (!url) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.onload = () => { setImage(img); setLoading(false); };
-    img.onerror = () => { setError("Failed to load image"); setLoading(false); };
+    img.onload = () => {
+      setImage(img);
+      setLoading(false);
+    };
+    img.onerror = () => {
+      setError("Failed to load image");
+      setLoading(false);
+    };
     img.src = url;
   }, [url]);
 
   return { image, loading, error };
 }
 
-// ============================================================
-// UTILS
-// ============================================================
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
 // ============================================================
-// HOOK: Undo/Redo History
-// ============================================================
-function useHistory(initial: BoundingBox[]) {
-  const [history, setHistory] = useState<BoundingBox[][]>([initial]);
-  const [index, setIndex] = useState(0);
-
-  // Sync with external changes (e.g. pre-annotations loaded)
-  useEffect(() => {
-    if (JSON.stringify(initial) !== JSON.stringify(history[index])) {
-      setHistory([initial]);
-      setIndex(0);
-    }
-  }, [initial]);
-
-  const push = useCallback((boxes: BoundingBox[]) => {
-    setHistory(prev => {
-      const next = prev.slice(0, index + 1);
-      next.push(boxes);
-      if (next.length > 50) next.shift();
-      return next;
-    });
-    setIndex(prev => Math.min(prev + 1, 49));
-  }, [index]);
-
-  const undo = useCallback(() => {
-    if (index > 0) setIndex(prev => prev - 1);
-  }, [index]);
-
-  const redo = useCallback(() => {
-    if (index < history.length - 1) setIndex(prev => prev + 1);
-  }, [index, history.length]);
-
-  return {
-    boxes: history[index] || initial,
-    push,
-    undo,
-    redo,
-    canUndo: index > 0,
-    canRedo: index < history.length - 1,
-  };
-}
-
-// ============================================================
-// HOOK: Annotation Hotkeys
-// ============================================================
-function useAnnotationHotkeys({
-  selectedBoxIndex, boxes, labels, history, copiedBox,
-  onDelete, onEscape, onToolChange, onUndo, onRedo,
-  onCopy, onPaste, onToggleHelp,
-}: {
-  selectedBoxIndex: number | null;
-  boxes: BoundingBox[];
-  labels: ProjectLabel[];
-  history: { undo: () => void; redo: () => void };
-  copiedBox: BoundingBox | null;
-  onDelete: () => void;
-  onEscape: () => void;
-  onToolChange: (tool: "draw" | "pan") => void;
-  onUndo: () => void;
-  onRedo: () => void;
-  onCopy: () => void;
-  onPaste: () => void;
-  onToggleHelp: () => void;
-}) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select") return;
-
-      // Delete
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedBoxIndex !== null) {
-        e.preventDefault();
-        onDelete();
-        return;
-      }
-
-      // Escape
-      if (e.key === "Escape") { onEscape(); return; }
-
-      // Tools
-      if (e.key === "d" || e.key === "D") { onToolChange("draw"); return; }
-      if (e.key === "p" || e.key === "P") { onToolChange("pan"); return; }
-
-      // Quick label (1-9)
-      if (/^[1-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey) {
-        const idx = parseInt(e.key) - 1;
-        if (idx < labels.length) {
-          e.preventDefault();
-          window.dispatchEvent(new CustomEvent("annotation:select-label", { detail: labels[idx].name }));
-        }
-        return;
-      }
-
-      // Undo (Ctrl+Z)
-      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
-        e.preventDefault();
-        onUndo();
-        return;
-      }
-
-      // Redo (Ctrl+Shift+Z)
-      if ((e.ctrlKey || e.metaKey) && e.key === "z" && e.shiftKey) {
-        e.preventDefault();
-        onRedo();
-        return;
-      }
-
-      // Copy (Ctrl+C)
-      if ((e.ctrlKey || e.metaKey) && e.key === "c" && selectedBoxIndex !== null) {
-        e.preventDefault();
-        onCopy();
-        return;
-      }
-
-      // Paste (Ctrl+V)
-      if ((e.ctrlKey || e.metaKey) && e.key === "v" && copiedBox) {
-        e.preventDefault();
-        onPaste();
-        return;
-      }
-
-      // Help
-      if (e.key === "?" && !e.ctrlKey && !e.metaKey) {
-        onToggleHelp();
-        return;
-      }
-    };
-
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [selectedBoxIndex, labels, copiedBox]);
-}
-
-// ============================================================
-// COMPONENT: Hotkeys Modal
+// HOTKEYS HELP MODAL
 // ============================================================
 function HotkeysHelp({ onClose }: { onClose: () => void }) {
   const shortcuts = [
     { keys: "1-9", desc: "Выбрать метку по номеру" },
     { keys: "Delete / Backspace", desc: "Удалить выбранную рамку" },
-    { keys: "Ctrl+Z", desc: "Отменить (Undo)" },
-    { keys: "Ctrl+Shift+Z", desc: "Повторить (Redo)" },
-    { keys: "Ctrl+C", desc: "Копировать рамку" },
-    { keys: "Ctrl+V", desc: "Вставить рамку" },
-    { keys: "Escape", desc: "Снять выделение" },
+    { keys: "Ctrl+Z", desc: "Отменить последнее действие" },
+    { keys: "Ctrl+Shift+Z", desc: "Повторить отменённое" },
+    { keys: "Ctrl+C", desc: "Копировать выбранную рамку" },
+    { keys: "Ctrl+V", desc: "Вставить скопированную рамку" },
+    { keys: "Escape", desc: "Снять выделение с рамки" },
     { keys: "D", desc: "Инструмент «Разметка»" },
     { keys: "P", desc: "Инструмент «Перемещение»" },
     { keys: "Ctrl+S", desc: "Сохранить черновик" },
-    { keys: "Enter", desc: "Отправить разметку" },
-    { keys: "→ / ←", desc: "Навигация по кадрам" },
+    { keys: "Enter", desc: "Отправить финальную разметку" },
+    { keys: "→ / ←", desc: "Следующий / предыдущий кадр" },
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div className="max-h-[80vh] w-full max-w-md overflow-auto rounded-xl bg-white p-6 shadow-xl dark:bg-gray-800" onClick={e => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[80vh] w-full max-w-md overflow-auto rounded-xl bg-white p-6 shadow-xl dark:bg-gray-800"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">⌨️ Горячие клавиши</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xl leading-none">×</button>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+            ⌨️ Горячие клавиши
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xl leading-none"
+          >
+            ×
+          </button>
         </div>
         <div className="space-y-2">
-          {shortcuts.map(s => (
+          {shortcuts.map((s) => (
             <div key={s.keys} className="flex justify-between text-sm">
-              <span className="font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">{s.keys}</span>
+              <span className="font-mono text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">
+                {s.keys}
+              </span>
               <span className="text-gray-600 dark:text-gray-400">{s.desc}</span>
             </div>
           ))}
@@ -205,72 +97,16 @@ function HotkeysHelp({ onClose }: { onClose: () => void }) {
 }
 
 // ============================================================
-// COMPONENT: Toolbar (CVAT-style grouped buttons)
-// ============================================================
-function Toolbar({
-  tool, onToolChange, canUndo, canRedo, onUndo, onRedo,
-  zoom, onZoom, onResetView, onToggleHelp,
-}: {
-  tool: "draw" | "pan";
-  onToolChange: (t: "draw" | "pan") => void;
-  canUndo: boolean; canRedo: boolean;
-  onUndo: () => void; onRedo: () => void;
-  zoom: number;
-  onZoom: (delta: number) => void;
-  onResetView: () => void;
-  onToggleHelp: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm dark:border-gray-800 dark:bg-gray-950">
-      {/* Tools group */}
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className={`btn-secondary ${tool === "draw" ? "ring-2 ring-blue-400" : ""}`}
-          onClick={() => onToolChange("draw")}
-        >
-          ✏️ Разметка <span className="text-xs opacity-50 ml-1">D</span>
-        </button>
-        <button
-          type="button"
-          className={`btn-secondary ${tool === "pan" ? "ring-2 ring-blue-400" : ""}`}
-          onClick={() => onToolChange("pan")}
-        >
-          ✋ Перемещение <span className="text-xs opacity-50 ml-1">P</span>
-        </button>
-      </div>
-
-      {/* Actions group */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-gray-300 dark:text-gray-700">|</span>
-        <button type="button" className="btn-secondary text-xs" disabled={!canUndo} onClick={onUndo}>
-          ↩ Отменить <span className="text-xs opacity-50 ml-1">Ctrl+Z</span>
-        </button>
-        <button type="button" className="btn-secondary text-xs" disabled={!canRedo} onClick={onRedo}>
-          ↪ Повторить <span className="text-xs opacity-50 ml-1">Ctrl+Shift+Z</span>
-        </button>
-      </div>
-
-      {/* Zoom group */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-gray-300 dark:text-gray-700">|</span>
-        <button type="button" className="btn-secondary text-xs" onClick={() => onZoom(-0.2)}>−</button>
-        <span className="min-w-[60px] text-center text-xs font-medium text-gray-600 dark:text-gray-300">{Math.round(zoom * 100)}%</span>
-        <button type="button" className="btn-secondary text-xs" onClick={() => onZoom(+0.2)}>+</button>
-        <button type="button" className="btn-secondary text-xs" onClick={onResetView}>Сброс</button>
-        <span className="text-gray-300 dark:text-gray-700">|</span>
-        <button type="button" className="btn-secondary text-xs font-bold" onClick={onToggleHelp} title="Горячие клавиши">?</button>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
 // MAIN COMPONENT
 // ============================================================
 export default function AnnotationCanvas({
-  imageUrl, value, labels, currentLabel,
-  selectedBoxIndex, onSelectedBoxIndexChange, onBoxesChange,
+  imageUrl,
+  value,
+  labels,
+  currentLabel,
+  selectedBoxIndex,
+  onSelectedBoxIndexChange,
+  onBoxesChange,
 }: {
   imageUrl: string;
   value: BoundingBox[];
@@ -280,197 +116,600 @@ export default function AnnotationCanvas({
   onSelectedBoxIndexChange: (index: number | null) => void;
   onBoxesChange: (boxes: BoundingBox[]) => void;
 }) {
-  // Refs
   const stageRef = useRef<any>(null);
   const contentRef = useRef<any>(null);
+  const deviceWidth = window.innerWidth
+  const deviceHeight = window.innerHeight
   const containerRef = useRef<HTMLDivElement | null>(null);
-
-  // State
   const [drawing, setDrawing] = useState(false);
-  const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null);
-  const [currentPos, setCurrentPos] = useState<{ x: number; y: number } | null>(null);
+  const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const [currentPos, setCurrentPos] = useState<{ x: number; y: number } | null>(
+    null,
+  );
   const [tool, setTool] = useState<"draw" | "pan">("draw");
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [viewportWidth, setViewportWidth] = useState(1100);
-  const [viewportHeight, setViewportHeight] = useState(760);
+    const [viewportWidth, setViewportWidth] = useState(deviceWidth);
+  const [viewportHeight, setViewportHeight] = useState(deviceHeight);
   const [showHotkeys, setShowHotkeys] = useState(false);
+
+  // Undo/Redo
+  const [history, setHistory] = useState<BoundingBox[][]>([value]);
+  const [historyIndex, setHistoryIndex] = useState(0);
   const [copiedBox, setCopiedBox] = useState<BoundingBox | null>(null);
 
-  // History
-  const history = useHistory(value);
-  useEffect(() => { onBoxesChange(history.boxes); }, [history.boxes]);
-
-  // Image
   const { image, loading, error } = useImageLoader(imageUrl);
+
   const imageWidth = image?.width || 1;
   const imageHeight = image?.height || 1;
 
-  // Viewport resize
+  // ---- Sync external value changes into history ----
+  useEffect(() => {
+    // When value changes from outside (e.g. pre-annotations loaded), reset history
+    if (JSON.stringify(value) !== JSON.stringify(history[historyIndex])) {
+      setHistory([value]);
+      setHistoryIndex(0);
+    }
+  }, [value]);
+
+  // ---- Push to history helper ----
+  const pushHistory = useCallback(
+    (newBoxes: BoundingBox[]) => {
+      const next = history.slice(0, historyIndex + 1);
+      next.push(newBoxes);
+      // Keep max 50 entries
+      if (next.length > 50) next.shift();
+      setHistory(next);
+      setHistoryIndex(next.length - 1);
+    },
+    [history, historyIndex],
+  );
+
+  // ---- Viewport resize ----
   useEffect(() => {
     if (!containerRef.current) return;
     const updateSize = () => {
-      const w = containerRef.current?.clientWidth || 1100;
-      const h = typeof window !== "undefined" ? Math.max(520, window.innerHeight - 240) : 760;
-      setViewportWidth(w);
-      setViewportHeight(Math.min(760, h));
+      const width =
+        typeof window !== "undefined"
+          ? window.innerWidth
+          : containerRef.current?.clientWidth || 1100;
+      const height =
+        typeof window !== "undefined"
+          ? window.innerHeight - 56
+          : containerRef.current?.clientHeight || 760;
+      setViewportWidth(width);
+      setViewportHeight(Math.max(560, height));
     };
     updateSize();
     const observer = new ResizeObserver(updateSize);
     observer.observe(containerRef.current);
-    return () => observer.disconnect();
+    window.addEventListener("resize", updateSize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateSize);
+    };
   }, []);
 
-  // Canvas sizing
-  const { canvasWidth, canvasHeight, fitScale, stageWidth, stageHeight, imageOffset } = useMemo(() => {
-    if (!image) return { canvasWidth: viewportWidth, canvasHeight: 640, fitScale: 1, stageWidth: viewportWidth, stageHeight: 640, imageOffset: { x: 0, y: 0 } };
-    const ratio = Math.min(viewportWidth / image.width, viewportHeight / image.height, 1);
-    const cw = image.width * ratio, ch = image.height * ratio;
-    const sw = Math.max(viewportWidth, cw), sh = Math.max(viewportHeight, ch);
+  // ---- Canvas sizing ----
+  const { canvasWidth, canvasHeight, fitScale, stageWidth, stageHeight } =
+    useMemo(() => {
+      if (!image) {
+        const fallbackHeight = Math.min(640, viewportHeight);
+        return {
+          canvasWidth: viewportWidth,
+          canvasHeight: fallbackHeight,
+          fitScale: 1,
+          stageWidth: viewportWidth,
+          stageHeight: fallbackHeight,
+        };
+      }
+      const ratio = Math.min(
+        viewportWidth / image.width,
+        viewportHeight / image.height,
+      );
+      const nextCanvasWidth = image.width * ratio;
+      const nextCanvasHeight = image.height * ratio;
+      return {
+        canvasWidth: nextCanvasWidth,
+        canvasHeight: nextCanvasHeight,
+        fitScale: ratio,
+        stageWidth: viewportWidth,
+        stageHeight: viewportHeight,
+      };
+    }, [image, viewportHeight, viewportWidth]);
+
+  const backdrop = useMemo(() => {
+    if (!image) {
+      return { x: 0, y: 0, width: stageWidth, height: stageHeight };
+    }
+    const ratio = Math.max(
+      stageWidth / image.width,
+      stageHeight / image.height,
+    );
+    const width = image.width * ratio;
+    const height = image.height * ratio;
     return {
-      canvasWidth: cw, canvasHeight: ch, fitScale: ratio,
-      stageWidth: sw, stageHeight: sh,
-      imageOffset: { x: Math.max(0, (sw - cw) / 2), y: Math.max(0, (sh - ch) / 2) },
+      x: (stageWidth - width) / 2,
+      y: (stageHeight - height) / 2,
+      width,
+      height,
     };
-  }, [image, viewportHeight, viewportWidth]);
+  }, [image, stageHeight, stageWidth]);
+
+  const clampPan = useCallback(
+    (nextPan: { x: number; y: number }, nextZoom: number) => {
+      const scaledWidth = canvasWidth * nextZoom;
+      const scaledHeight = canvasHeight * nextZoom;
+      const x =
+        scaledWidth <= stageWidth
+          ? (stageWidth - scaledWidth) / 2
+          : clamp(nextPan.x, stageWidth - scaledWidth, 0);
+      const y =
+        scaledHeight <= stageHeight
+          ? (stageHeight - scaledHeight) / 2
+          : clamp(nextPan.y, stageHeight - scaledHeight, 0);
+      return { x, y };
+    },
+    [canvasHeight, canvasWidth, stageHeight, stageWidth],
+  );
+
+  const getCenteredPan = useCallback(
+    (nextZoom: number) => ({
+      x: (stageWidth - canvasWidth * nextZoom) / 2,
+      y: (stageHeight - canvasHeight * nextZoom) / 2,
+    }),
+    [canvasHeight, canvasWidth, stageHeight, stageWidth],
+  );
 
   useEffect(() => {
     setZoom(1);
-    setPan({ x: imageOffset.x, y: imageOffset.y });
-  }, [imageUrl, canvasWidth, canvasHeight]);
+    setPan(clampPan(getCenteredPan(1), 1));
+  }, [imageUrl, canvasWidth, canvasHeight, clampPan, getCenteredPan]);
 
-  const labelColorMap = useMemo(() => new Map(labels.map(l => [l.name, l.color || "#ef4444"])), [labels]);
+  const labelColorMap = useMemo(() => {
+    return new Map(
+      labels.map((label) => [label.name, label.color || "#ef4444"]),
+    );
+  }, [labels]);
 
-  // Coordinates
-  const toImageCoords = (x: number, y: number) => ({ x: clamp(x / fitScale, 0, imageWidth), y: clamp(y / fitScale, 0, imageHeight) });
-  const toCanvasCoords = (box: BoundingBox) => ({ x: box.x * fitScale, y: box.y * fitScale, width: box.width * fitScale, height: box.height * fitScale });
-  const getPointer = () => { const p = contentRef.current?.getRelativePointerPosition(); return p ? { x: clamp(p.x, 0, canvasWidth), y: clamp(p.y, 0, canvasHeight) } : null; };
+  // ---- Coordinate transforms ----
+  const toImageCoords = (x: number, y: number) => ({
+    x: clamp(x / fitScale, 0, imageWidth),
+    y: clamp(y / fitScale, 0, imageHeight),
+  });
 
-  // Mouse
-  const handleMouseDown = (e: any) => {
+  const toCanvasCoords = (box: BoundingBox) => ({
+    x: box.x * fitScale,
+    y: box.y * fitScale,
+    width: box.width * fitScale,
+    height: box.height * fitScale,
+  });
+
+  const getPointerOnCanvas = () => {
+    const position = contentRef.current?.getRelativePointerPosition();
+    if (!position) return null;
+    return {
+      x: clamp(position.x, 0, canvasWidth),
+      y: clamp(position.y, 0, canvasHeight),
+    };
+  };
+
+  // ---- Mouse handlers ----
+  const handleMouseDown = (event: any) => {
     if (tool === "pan") return;
-    if (e.target?.className && e.target.className !== "Stage" && e.target.className !== "Image") return;
+    const targetClassName = event.target?.className;
+    if (targetClassName !== "Image") return;
     if (!currentLabel) return;
-    const pos = getPointer(); if (!pos) return;
-    setDrawing(true); setStartPos(pos); setCurrentPos(pos);
+    const pos = getPointerOnCanvas();
+    if (!pos) return;
+    setDrawing(true);
+    setStartPos(pos);
+    setCurrentPos(pos);
     onSelectedBoxIndexChange(null);
   };
-  const handleMouseMove = () => { if (!drawing) return; const pos = getPointer(); if (pos) setCurrentPos(pos); };
-  const handleMouseUp = () => {
-    if (!drawing || !startPos || !currentPos || !currentLabel) { setDrawing(false); setStartPos(null); setCurrentPos(null); return; }
-    const s = toImageCoords(startPos.x, startPos.y), e = toImageCoords(currentPos.x, currentPos.y);
-    const box: BoundingBox = { x: Math.min(s.x, e.x), y: Math.min(s.y, e.y), width: Math.abs(e.x - s.x), height: Math.abs(e.y - s.y), label: currentLabel };
-    if (box.width > 4 && box.height > 4) {
-      const newBoxes = [...value, box];
-      history.push(newBoxes);
-      onBoxesChange(newBoxes);
-      onSelectedBoxIndexChange(newBoxes.length - 1);
-    }
-    setDrawing(false); setStartPos(null); setCurrentPos(null);
+
+  const handleMouseMove = () => {
+    if (!drawing) return;
+    const pos = getPointerOnCanvas();
+    if (!pos) return;
+    setCurrentPos(pos);
   };
 
-  // Drag
-  const updateDraggedBox = (index: number, nx: number, ny: number) => {
-    const newBoxes = value.map((box, i) => i === index ? { ...box, x: clamp(nx / fitScale, 0, Math.max(0, imageWidth - box.width)), y: clamp(ny / fitScale, 0, Math.max(0, imageHeight - box.height)) } : box);
-    history.push(newBoxes);
+  const handleMouseUp = () => {
+    if (!drawing || !startPos || !currentPos || !currentLabel) {
+      setDrawing(false);
+      setStartPos(null);
+      setCurrentPos(null);
+      return;
+    }
+
+    const start = toImageCoords(startPos.x, startPos.y);
+    const end = toImageCoords(currentPos.x, currentPos.y);
+    const nextBox: BoundingBox = {
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
+      label: currentLabel,
+    };
+
+    if (nextBox.width > 4 && nextBox.height > 4) {
+      const newBoxes = [...value, nextBox];
+      pushHistory(newBoxes);
+      onBoxesChange(newBoxes);
+      onSelectedBoxIndexChange(newBoxes.length - 1); // ✅ исправлено: теперь показывает правильный индекс
+    }
+
+    setDrawing(false);
+    setStartPos(null);
+    setCurrentPos(null);
+  };
+
+  // ---- Drag / Update ----
+  const updateDraggedBox = (index: number, nextX: number, nextY: number) => {
+    const newBoxes = value.map((box, boxIndex) =>
+      boxIndex === index
+        ? {
+            ...box,
+            x: clamp(nextX / fitScale, 0, Math.max(0, imageWidth - box.width)),
+            y: clamp(
+              nextY / fitScale,
+              0,
+              Math.max(0, imageHeight - box.height),
+            ),
+          }
+        : box,
+    );
+    pushHistory(newBoxes);
     onBoxesChange(newBoxes);
   };
 
-  // Zoom
-  const applyZoom = (next: number) => {
-    const clamped = clamp(next, 1, 5);
-    const ptr = stageRef.current?.getPointerPosition();
-    if (!ptr) { setZoom(clamped); return; }
-    const mx = (ptr.x - pan.x) / zoom, my = (ptr.y - pan.y) / zoom;
-    setZoom(clamped);
-    setPan({ x: ptr.x - mx * clamped, y: ptr.y - my * clamped });
+  const undo = useCallback(() => {
+    if (historyIndex > 0) {
+      const newIndex = historyIndex - 1;
+      setHistoryIndex(newIndex);
+      onBoxesChange(history[newIndex]);
+      onSelectedBoxIndexChange(null);
+    }
+  }, [history, historyIndex, onBoxesChange, onSelectedBoxIndexChange]);
+
+  const redo = useCallback(() => {
+    if (historyIndex < history.length - 1) {
+      const newIndex = historyIndex + 1;
+      setHistoryIndex(newIndex);
+      onBoxesChange(history[newIndex]);
+      onSelectedBoxIndexChange(null);
+    }
+  }, [history, historyIndex, onBoxesChange, onSelectedBoxIndexChange]);
+
+  // ---- Zoom ----
+  const resetView = () => {
+    setZoom(1);
+    setPan(clampPan(getCenteredPan(1), 1));
   };
 
-  // Hotkeys
-  useAnnotationHotkeys({
-    selectedBoxIndex, boxes: value, labels, history, copiedBox,
-    onDelete: () => {
-      if (selectedBoxIndex === null) return;
-      const newBoxes = value.filter((_, i) => i !== selectedBoxIndex);
-      history.push(newBoxes);
-      onBoxesChange(newBoxes);
-      onSelectedBoxIndexChange(null);
-    },
-    onEscape: () => onSelectedBoxIndexChange(null),
-    onToolChange: setTool,
-    onUndo: () => { history.undo(); onSelectedBoxIndexChange(null); },
-    onRedo: () => { history.redo(); onSelectedBoxIndexChange(null); },
-    onCopy: () => { if (selectedBoxIndex !== null) setCopiedBox({ ...value[selectedBoxIndex] }); },
-    onPaste: () => {
-      if (!copiedBox) return;
-      const box = { ...copiedBox, x: copiedBox.x + 10, y: copiedBox.y + 10 };
-      const newBoxes = [...value, box];
-      history.push(newBoxes);
-      onBoxesChange(newBoxes);
-      onSelectedBoxIndexChange(newBoxes.length - 1);
-    },
-    onToggleHelp: () => setShowHotkeys(prev => !prev),
-  });
+  const applyZoom = (nextZoom: number) => {
+    const stage = stageRef.current;
+    const pointer = stage?.getPointerPosition();
+    const clampedZoom = clamp(nextZoom, 1, 5);
+    if (!pointer) {
+      setZoom(clampedZoom);
+      setPan((current) => clampPan(current, clampedZoom));
+      return;
+    }
+    const mousePointTo = {
+      x: (pointer.x - pan.x) / zoom,
+      y: (pointer.y - pan.y) / zoom,
+    };
+    setZoom(clampedZoom);
+    setPan(
+      clampPan(
+        {
+          x: pointer.x - mousePointTo.x * clampedZoom,
+          y: pointer.y - mousePointTo.y * clampedZoom,
+        },
+        clampedZoom,
+      ),
+    );
+  };
 
-  // Render
-  if (loading) return <div className="flex h-[560px] items-center justify-center rounded-lg bg-gray-100 text-sm text-gray-500">Загрузка...</div>;
-  if (error || !imageUrl) return <div className="flex h-[560px] items-center justify-center rounded-lg border border-dashed border-gray-300 text-sm text-gray-500">{error || "Кадр недоступен"}</div>;
+  const handleWheel = (event: any) => {
+    event.evt.preventDefault();
+    const direction = event.evt.deltaY > 0 ? -1 : 1;
+    const nextZoom = zoom + direction * 0.15;
+    applyZoom(nextZoom);
+  };
+
+  // ============================================================
+  // ⌨️ HOTKEYS
+  // ============================================================
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input/textarea
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+
+      // ---- Delete selected box ----
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        selectedBoxIndex !== null
+      ) {
+        e.preventDefault();
+        const newBoxes = value.filter((_, i) => i !== selectedBoxIndex);
+        pushHistory(newBoxes);
+        onBoxesChange(newBoxes);
+        onSelectedBoxIndexChange(null);
+        return;
+      }
+
+      // ---- Escape ----
+      if (e.key === "Escape") {
+        onSelectedBoxIndexChange(null);
+        return;
+      }
+
+      // ---- Tool switch ----
+      if (e.key === "d" || e.key === "D") {
+        setTool("draw");
+        return;
+      }
+      if (e.key === "p" || e.key === "P") {
+        setTool("pan");
+        return;
+      }
+
+      // ---- Quick label select (1-9) ----
+      if (/^[1-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey) {
+        const idx = parseInt(e.key) - 1;
+        if (idx < labels.length) {
+          e.preventDefault();
+          // We need to call onLabelSelect — pass via a custom event or prop
+          // For now we dispatch a custom event that AnnotationPage listens to
+          window.dispatchEvent(
+            new CustomEvent("annotation:select-label", {
+              detail: labels[idx].name,
+            }),
+          );
+        }
+        return;
+      }
+
+      // ---- Undo (Ctrl+Z) ----
+      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+
+      // ---- Redo (Ctrl+Shift+Z) ----
+      if ((e.ctrlKey || e.metaKey) && e.key === "z" && e.shiftKey) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+
+      // ---- Copy (Ctrl+C) ----
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key === "c" &&
+        selectedBoxIndex !== null
+      ) {
+        e.preventDefault();
+        setCopiedBox({ ...value[selectedBoxIndex] });
+        return;
+      }
+
+      // ---- Paste (Ctrl+V) ----
+      if ((e.ctrlKey || e.metaKey) && e.key === "v" && copiedBox) {
+        e.preventDefault();
+        const newBox = {
+          ...copiedBox,
+          x: copiedBox.x + 10,
+          y: copiedBox.y + 10,
+        };
+        const newBoxes = [...value, newBox];
+        pushHistory(newBoxes);
+        onBoxesChange(newBoxes);
+        onSelectedBoxIndexChange(newBoxes.length - 1);
+        return;
+      }
+
+      // ---- Hotkeys help ----
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey) {
+        setShowHotkeys((prev) => !prev);
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [
+    selectedBoxIndex,
+    value,
+    labels,
+    history,
+    historyIndex,
+    copiedBox,
+    tool,
+    fitScale,
+    imageWidth,
+    imageHeight,
+    undo,
+    redo,
+  ]);
+
+  useEffect(() => {
+    window.addEventListener("annotation:undo", undo);
+    window.addEventListener("annotation:redo", redo);
+    const setDrawTool = () => setTool("draw");
+    const setPanTool = () => setTool("pan");
+    const zoomIn = () => applyZoom(zoom + 0.2);
+    const zoomOut = () => applyZoom(zoom - 0.2);
+    window.addEventListener("annotation:tool-draw", setDrawTool);
+    window.addEventListener("annotation:tool-pan", setPanTool);
+    window.addEventListener("annotation:zoom-in", zoomIn);
+    window.addEventListener("annotation:zoom-out", zoomOut);
+    window.addEventListener("annotation:reset-view", resetView);
+    return () => {
+      window.removeEventListener("annotation:undo", undo);
+      window.removeEventListener("annotation:redo", redo);
+      window.removeEventListener("annotation:tool-draw", setDrawTool);
+      window.removeEventListener("annotation:tool-pan", setPanTool);
+      window.removeEventListener("annotation:zoom-in", zoomIn);
+      window.removeEventListener("annotation:zoom-out", zoomOut);
+      window.removeEventListener("annotation:reset-view", resetView);
+    };
+  }, [undo, redo, zoom]);
+
+  // ---- Loading / Error states ----
+  if (loading) {
+    return (
+      <div className="flex h-[560px] items-center justify-center rounded-lg bg-gray-100 text-sm text-gray-500">
+        Загрузка изображения...
+      </div>
+    );
+  }
+
+  if (error || !imageUrl) {
+    return (
+      <div className="flex h-[560px] items-center justify-center rounded-lg border border-dashed border-gray-300 text-sm text-gray-500">
+        {error || "Кадр недоступен"}
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-3">
-      <Toolbar
-        tool={tool} onToolChange={setTool}
-        canUndo={history.canUndo} canRedo={history.canRedo}
-        onUndo={() => { history.undo(); onSelectedBoxIndexChange(null); }}
-        onRedo={() => { history.redo(); onSelectedBoxIndexChange(null); }}
-        zoom={zoom} onZoom={(d) => applyZoom(zoom + d)}
-        onResetView={() => { setZoom(1); setPan({ x: imageOffset.x, y: imageOffset.y }); }}
-        onToggleHelp={() => setShowHotkeys(true)}
-      />
-
-      <div ref={containerRef} className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <Stage ref={stageRef} width={stageWidth} height={stageHeight}
-          onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
-          onWheel={(e) => { e.evt.preventDefault(); applyZoom(zoom + (e.evt.deltaY > 0 ? -0.15 : 0.15)); }}
-          className={tool === "pan" ? "cursor-grab" : "cursor-crosshair"}
+    <div className="h-full min-h-0">
+      <div className="relative h-full min-h-0">
+        <div
+          ref={containerRef}
+          className="h-full min-h-0 overflow-hidden bg-gray-950"
         >
-          <Layer>
-            <Group ref={contentRef} x={pan.x} y={pan.y} scaleX={zoom} scaleY={zoom}
-              draggable={tool === "pan"}
-              onDragEnd={(e) => setPan({ x: e.target.x(), y: e.target.y() })}
-            >
-              {image && <KonvaImage image={image} width={canvasWidth} height={canvasHeight} />}
-              {value.map((box, i) => {
-                const cb = toCanvasCoords(box);
-                const color = labelColorMap.get(box.label) || "#ef4444";
-                const sel = selectedBoxIndex === i;
-                return (
-                  <Group key={`${box.label}-${i}`} draggable={tool === "draw"}
-                    onClick={(e) => { e.cancelBubble = true; onSelectedBoxIndexChange(i); }}
-                    onTap={(e) => { e.cancelBubble = true; onSelectedBoxIndexChange(i); }}
-                    onDragEnd={(e) => updateDraggedBox(i, e.target.x(), e.target.y())}
-                    x={cb.x} y={cb.y}
-                  >
-                    <Rect width={cb.width} height={cb.height} stroke={color} strokeWidth={sel ? 3 : 2} dash={sel ? [8, 4] : undefined} />
-                    <Text y={-18} text={box.label} fill={color} fontSize={14} fontStyle="bold" />
-                  </Group>
-                );
-              })}
-              {drawing && startPos && currentPos && (
-                <Rect x={Math.min(startPos.x, currentPos.x)} y={Math.min(startPos.y, currentPos.y)}
-                  width={Math.abs(currentPos.x - startPos.x)} height={Math.abs(currentPos.y - startPos.y)}
-                  stroke="#2563eb" strokeWidth={2} dash={[8, 4]} />
-              )}
-            </Group>
-          </Layer>
-        </Stage>
+          <Stage
+            ref={stageRef}
+            width={stageWidth}
+            height={stageHeight}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onWheel={handleWheel}
+            className={tool === "pan" ? "cursor-grab" : "cursor-crosshair"}
+          >
+            <Layer>
+              {image ? (
+                <KonvaImage
+                  image={image}
+                  x={backdrop.x}
+                  y={backdrop.y}
+                  width={backdrop.width}
+                  height={backdrop.height}
+                  opacity={0.22}
+                  listening={false}
+                />
+              ) : null}
+              <Rect
+                width={stageWidth}
+                height={stageHeight}
+                fill="rgba(0,0,0,0.28)"
+                listening={false}
+              />
+              <Group
+                ref={contentRef}
+                x={pan.x}
+                y={pan.y}
+                scaleX={zoom}
+                scaleY={zoom}
+                draggable={tool === "pan"}
+                dragBoundFunc={(position) => clampPan(position, zoom)}
+                onDragEnd={(event) =>
+                  setPan(
+                    clampPan(
+                      { x: event.target.x(), y: event.target.y() },
+                      zoom,
+                    ),
+                  )
+                }
+              >
+                {image ? (
+                  <KonvaImage
+                    image={image}
+                    width={canvasWidth}
+                    height={canvasHeight}
+                  />
+                ) : null}
+                {value.map((box, index) => {
+                  const canvasBox = toCanvasCoords(box);
+                  const color = labelColorMap.get(box.label) || "#ef4444";
+                  const isSelected = selectedBoxIndex === index;
+                  return (
+                    <Group
+                      key={`${box.label}-${index}`}
+                      draggable={tool === "draw"}
+                      onClick={(event) => {
+                        event.cancelBubble = true;
+                        onSelectedBoxIndexChange(index);
+                      }}
+                      onTap={(event) => {
+                        event.cancelBubble = true;
+                        onSelectedBoxIndexChange(index);
+                      }}
+                      onDragEnd={(event) =>
+                        updateDraggedBox(
+                          index,
+                          event.target.x(),
+                          event.target.y(),
+                        )
+                      }
+                      x={canvasBox.x}
+                      y={canvasBox.y}
+                    >
+                      <Rect
+                        width={canvasBox.width}
+                        height={canvasBox.height}
+                        stroke={color}
+                        strokeWidth={1}
+                        dash={isSelected ? [8, 4] : undefined}
+                      />
+                      <Text
+                        y={-18}
+                        text={box.label}
+                        fill={color}
+                        fontSize={14}
+                        fontStyle="bold"
+                      />
+                    </Group>
+                  );
+                })}
+                {drawing && startPos && currentPos ? (
+                  <Rect
+                    x={Math.min(startPos.x, currentPos.x)}
+                    y={Math.min(startPos.y, currentPos.y)}
+                    width={Math.abs(currentPos.x - startPos.x)}
+                    height={Math.abs(currentPos.y - startPos.y)}
+                    stroke="#2563eb"
+                    strokeWidth={1}
+                    dash={[8, 4]}
+                  />
+                ) : null}
+              </Group>
+            </Layer>
+          </Stage>
+        </div>
+
+        {/* ===== ⌨️ ? BUTTON — bottom-right corner ===== */}
+        <button
+          type="button"
+          onClick={() => setShowHotkeys(true)}
+          className="absolute bottom-3 right-3 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-gray-800/70 text-white shadow-lg hover:bg-gray-900/80 transition text-lg font-bold"
+          title="Горячие клавиши"
+        >
+          ?
+        </button>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-gray-500 dark:text-gray-400">
-        <span>🖱️ {tool === "draw" ? "Разметка" : "Перемещение"} | Метка: <b>{currentLabel || "не выбрана"}</b></span>
-        <span>{value.length} рамок</span>
-      </div>
-
+      {/* ===== HOTKEYS MODAL ===== */}
       {showHotkeys && <HotkeysHelp onClose={() => setShowHotkeys(false)} />}
     </div>
   );

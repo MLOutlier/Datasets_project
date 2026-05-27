@@ -543,6 +543,36 @@ class TestUnifiedCvWorkflow:
         assert outsider_projects.data["available_projects"] == []
         assert outsider_projects.data["active_projects"] == []
 
+    def test_import_returns_bad_request_when_upload_storage_is_not_writable(self, client, auth_headers, monkeypatch):
+        project_resp = client.post(
+            "/api/projects/",
+            {
+                "title": "Readonly media project",
+                "project_type": "cv",
+                "annotation_type": "bbox",
+                "instructions": "Upload should fail cleanly",
+                "label_schema": [{"name": "drone"}],
+                "assignments_per_task": 1,
+            },
+            **auth_headers,
+            format="json",
+        )
+        project_id = project_resp.data["id"]
+
+        def fail_save(*_args, **_kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr("apps.cv_annotation.views.save_project_file", fail_save)
+
+        upload_resp = client.post(
+            f"/api/projects/{project_id}/imports/",
+            {"file": make_test_image("readonly.png")},
+            **auth_headers,
+        )
+
+        assert upload_resp.status_code == 400
+        assert upload_resp.data["detail"] == "Upload storage is not writable. Check MEDIA_ROOT permissions."
+
     def test_annotator_with_assignment_can_continue_even_without_membership(self, client, auth_headers, user_annotator):
         project_resp = client.post(
             "/api/projects/",

@@ -16,6 +16,7 @@ build/
 *.log
 db.sqlite3
 /media
+/media_readonly_backup_*
 /staticfiles
 
 # IDE

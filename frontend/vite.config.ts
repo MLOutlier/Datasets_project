@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+import fs from "fs";
 
 /**
  * Vite config:
@@ -12,9 +13,14 @@ import path from "path";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
 
-  // Для Docker: используем имя сервиса 'web' (внутренняя Docker сеть)
-  // Для локальной разработки: http://localhost:8001
-  const apiUrl = env.VITE_API_URL || "http://web:8000";
+  const configuredApiUrl = env.VITE_API_URL || "http://127.0.0.1:8001";
+  const isDocker = fs.existsSync("/.dockerenv");
+  const pointsToContainerLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?/i.test(
+    configuredApiUrl
+  );
+
+  // Vite proxy runs inside the frontend container, so localhost is not the backend there.
+  const apiUrl = isDocker && pointsToContainerLocalhost ? "http://web:8000" : configuredApiUrl;
 
   console.log(`🔧 Vite Proxy: /api → ${apiUrl}`);
 
