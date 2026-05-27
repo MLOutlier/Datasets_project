@@ -11,7 +11,7 @@ from ..users.models import User
 from .models import QualityMetric, QualityReview, RatingHistory
 from .services.dawid_skene import dawid_skene_em, extract_class_label
 from .services.iou_matching import greedy_iou_matching
-
+from apps.users.notification_utils import notify_task_approved, notify_task_rejected
 
 def _safe_float(v: Any) -> float:
     try:
@@ -334,5 +334,12 @@ class ReviewSerializer(serializers.Serializer):
                 iteration_count=all_metrics.get("iterations", 0),
                 annotation_format=annotation_format,
             ).save()
+            
+            # ✅ Добавить уведомление о результате проверки качества
+            project_title = getattr(task.project, 'title', 'проекте') if task.project else 'проекте'
+            if accuracy >= 0.7:
+                notify_task_approved(ann.annotator, str(task.id), project_title)
+            else:
+                notify_task_rejected(ann.annotator, str(task.id), project_title)
 
         return review

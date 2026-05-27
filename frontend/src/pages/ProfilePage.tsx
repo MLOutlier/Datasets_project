@@ -23,9 +23,8 @@ export function ProfilePage() {
   const user = useAuthStore((s) => s.user);
   const loading = useAuthStore((s) => s.loading);
   const loadMe = useAuthStore((s) => s.loadMe);
-  const setUser = useAuthStore((s) => s.setUser); // нужно добавить в store
+  const setUser = useAuthStore((s) => s.setUser);
 
-  // Состояния для загрузки аватарки
   const [isUploading, setIsUploading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -40,33 +39,26 @@ export function ProfilePage() {
     enabled: !!user?.id,
   });
 
-  // Обработчик выбора файла
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Проверка типа
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    const allowedTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
     if (!allowedTypes.includes(file.type)) {
-      alert('Разрешены только изображения: JPG, PNG, GIF, WebP');
+      alert("Разрешены только изображения: JPG, PNG, GIF, WebP");
       return;
     }
 
-    // Проверка размера (макс 500KB)
     if (file.size > 500 * 1024) {
-      alert('Файл слишком большой. Максимальный размер: 500KB');
+      alert("Файл слишком большой. Максимальный размер: 500KB");
       return;
     }
 
-    // Предпросмотр
     const reader = new FileReader();
-    reader.onload = (e) => {
-      setPreviewUrl(e.target?.result as string);
-    };
+    reader.onload = (e) => setPreviewUrl(e.target?.result as string);
     reader.readAsDataURL(file);
   };
 
-  // Загрузка аватарки
   const handleUpload = async () => {
     const file = fileInputRef.current?.files?.[0];
     if (!file) return;
@@ -74,47 +66,34 @@ export function ProfilePage() {
     setIsUploading(true);
     try {
       const result = await usersAPI.uploadAvatar(file);
-      
-      // Обновить пользователя в сторе
-      if (user) {
-        setUser({ ...user, avatar_url: result.avatar_url });
-      }
-      
+      if (user) setUser({ ...user, avatar_url: result.avatar_url });
       setPreviewUrl(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      alert('Аватар успешно загружен!');
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      alert("Аватар успешно загружен!");
     } catch (error) {
-      console.error('Ошибка загрузки аватарки:', error);
-      alert('Ошибка при загрузке аватарки');
+      console.error("Ошибка загрузки аватарки:", error);
+      alert("Ошибка при загрузке аватарки");
     } finally {
       setIsUploading(false);
     }
   };
 
-  // Удаление аватарки
   const handleDelete = async () => {
-    if (!confirm('Удалить аватар?')) return;
-
+    if (!confirm("Удалить аватар?")) return;
     try {
       await usersAPI.deleteAvatar();
-      
-      // Обновить пользователя в сторе
-      if (user) {
-        setUser({ ...user, avatar_url: null });
-      }
-      
+      if (user) setUser({ ...user, avatar_url: null });
       setPreviewUrl(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (error) {
-      console.error('Ошибка удаления аватарки:', error);
-      alert('Ошибка при удалении аватарки');
+      console.error("Ошибка удаления аватарки:", error);
+      alert("Ошибка при удалении аватарки");
     }
   };
 
-  // Отмена предпросмотра
   const handleCancel = () => {
     setPreviewUrl(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   if (loading && !user) return <LoadingSpinner />;
@@ -126,63 +105,40 @@ export function ProfilePage() {
   const levelColor = stats?.level_color ?? "#F59E0B";
   const levelGradient = LEVEL_GRADIENTS[level] ?? LEVEL_GRADIENTS.novice;
   const ratingPercent = Math.min(100, (rating / 5) * 100);
-
-  // Определяем, что показывает аватар
   const avatarUrl = previewUrl || user?.avatar_url || null;
 
   return (
     <div className="space-y-8 max-w-5xl mx-auto">
-      {/* ========== Карточка профиля ========== */}
+      {/* Карточка профиля */}
       <div className="relative overflow-hidden rounded-2xl bg-white dark:bg-gray-900 shadow-xl border border-gray-200 dark:border-gray-700">
-        {/* Фоновый градиент */}
         <div className={`absolute inset-0 bg-gradient-to-br ${levelGradient} opacity-10 dark:opacity-20`} />
 
         <div className="relative p-8">
           <div className="flex flex-col md:flex-row items-start md:items-center gap-6">
-            {/* Аватар с уровнем */}
+            {/* Аватар */}
             <div className="relative group">
-              {/* Круглая аватарка */}
               <div className={`w-24 h-24 rounded-full overflow-hidden bg-gradient-to-br ${levelGradient} flex items-center justify-center text-5xl shadow-lg transition-transform group-hover:scale-105`}>
                 {avatarUrl ? (
-                  <img
-                    src={avatarUrl}
-                    alt={user?.username}
-                    className="w-full h-full object-cover"
-                  />
+                  <img src={avatarUrl} alt={user?.username} className="w-full h-full object-cover" />
                 ) : (
-                  <span className="text-white text-3xl font-bold">
-                    {(user?.username || "U").charAt(0).toUpperCase()}
-                  </span>
+                  <span className="text-white text-3xl font-bold">{(user?.username || "U").charAt(0).toUpperCase()}</span>
                 )}
               </div>
 
-              {/* Кнопки редактирования (только для владельца) */}
               <div className="absolute -bottom-2 -right-2 flex gap-1">
                 {!previewUrl && (
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-8 h-8 rounded-full bg-white dark:bg-gray-700 shadow-lg border border-gray-200 dark:border-gray-600 flex items-center justify-center text-sm hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors"
-                    title="Загрузить фото"
-                  >
+                  <button onClick={() => fileInputRef.current?.click()} className="w-8 h-8 rounded-full bg-white dark:bg-gray-700 shadow-lg border border-gray-200 flex items-center justify-center text-sm hover:bg-gray-50 transition-colors" title="Загрузить фото">
                     📷
                   </button>
                 )}
                 {user?.avatar_url && !previewUrl && (
-                  <button
-                    onClick={handleDelete}
-                    className="w-8 h-8 rounded-full bg-white dark:bg-gray-700 shadow-lg border border-gray-200 dark:border-gray-600 flex items-center justify-center text-sm hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                    title="Удалить фото"
-                  >
+                  <button onClick={handleDelete} className="w-8 h-8 rounded-full bg-white dark:bg-gray-700 shadow-lg border border-gray-200 flex items-center justify-center text-sm hover:bg-red-50 transition-colors" title="Удалить фото">
                     🗑️
                   </button>
                 )}
               </div>
 
-              {/* Бейдж уровня */}
-              <div
-                className="absolute -top-2 -right-2 px-3 py-1 rounded-full text-xs font-bold text-white shadow-md"
-                style={{ backgroundColor: levelColor }}
-              >
+              <div className="absolute -top-2 -right-2 px-3 py-1 rounded-full text-xs font-bold text-white shadow-md" style={{ backgroundColor: levelColor }}>
                 {levelLabel}
               </div>
             </div>
@@ -194,20 +150,12 @@ export function ProfilePage() {
                 <p className="text-gray-600 dark:text-gray-400">{user?.email}</p>
               </div>
 
-              {/* Кнопки управления аватаркой (если выбран файл) */}
               {previewUrl && (
                 <div className="flex gap-2">
-                  <button
-                    onClick={handleUpload}
-                    disabled={isUploading}
-                    className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                  >
-                    {isUploading ? 'Загрузка...' : '💾 Сохранить фото'}
+                  <button onClick={handleUpload} disabled={isUploading} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                    {isUploading ? "Загрузка..." : "💾 Сохранить фото"}
                   </button>
-                  <button
-                    onClick={handleCancel}
-                    className="px-4 py-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                  >
+                  <button onClick={handleCancel} className="px-4 py-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-300 transition-colors">
                     Отмена
                   </button>
                 </div>
@@ -229,39 +177,21 @@ export function ProfilePage() {
                 )}
               </div>
 
-              {/* Скрытый input для загрузки файла */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/gif,image/webp"
-                onChange={handleFileSelect}
-                className="hidden"
-              />
+              <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp" onChange={handleFileSelect} className="hidden" />
 
-              {/* Шкала рейтинга */}
               {user?.role === "annotator" && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                      ⭐ Рейтинг: {rating.toFixed(2)}
-                    </span>
-                    <span className="text-xs text-gray-500 dark:text-gray-400">
-                      До следующего уровня: {(stats?.next_level_rating ?? 5) - rating > 0 ? ((stats?.next_level_rating ?? 5) - rating).toFixed(2) : "0.00"}
-                    </span>
+                    <span className="text-sm font-medium text-gray-700 dark:text-gray-300">⭐ Рейтинг: {rating.toFixed(2)}</span>
+                    <span className="text-xs text-gray-500">До следующего уровня: {Math.max(0, (stats?.next_level_rating ?? 5) - rating).toFixed(2)}</span>
                   </div>
                   <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden shadow-inner">
-                    <div
-                      className={`h-full rounded-full bg-gradient-to-r ${levelGradient} transition-all duration-700 ease-out relative`}
-                      style={{ width: `${ratingPercent}%` }}
-                    >
+                    <div className={`h-full rounded-full bg-gradient-to-r ${levelGradient} transition-all duration-700 ease-out relative`} style={{ width: `${ratingPercent}%` }}>
                       <div className="absolute inset-0 bg-white opacity-20 rounded-full animate-pulse" />
                     </div>
                   </div>
-                  <div className="flex justify-between text-xs text-gray-400 dark:text-gray-500">
-                    <span>0</span>
-                    <span>2.0 (Новичок)</span>
-                    <span>3.5 (Уверенный)</span>
-                    <span>4.5 (Эксперт)</span>
+                  <div className="flex justify-between text-xs text-gray-400">
+                    <span>0</span><span>2.0 (Новичок)</span><span>3.5 (Уверенный)</span><span>4.5 (Эксперт)</span>
                   </div>
                 </div>
               )}
@@ -270,59 +200,24 @@ export function ProfilePage() {
         </div>
       </div>
 
-      {/* ========== Статистика ========== */}
+      {/* Статистика */}
       {user?.role === "annotator" && (
         <>
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-            📊 Статистика
-          </h2>
-          
-          {statsQuery.isLoading ? (
-            <LoadingSpinner />
-          ) : (
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">📊 Статистика</h2>
+          {statsQuery.isLoading ? <LoadingSpinner /> : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {/* Выполнено задач */}
-              <StatCard
-                icon="✅"
-                value={stats?.completed_tasks ?? 0}
-                label="Выполнено задач"
-                gradient="from-blue-400 to-indigo-500"
-                bgClass="bg-blue-100 dark:bg-blue-900/30"
-              />
-              {/* Всего аннотаций */}
-              <StatCard
-                icon="📝"
-                value={stats?.total_annotations ?? 0}
-                label="Всего аннотаций"
-                gradient="from-emerald-400 to-green-500"
-                bgClass="bg-emerald-100 dark:bg-emerald-900/30"
-              />
-              {/* Средний F1-score */}
-              <StatCard
-                icon="🎯"
-                value={`${((stats?.average_f1 ?? 0) * 100).toFixed(1)}%`}
-                label="Средняя точность (F1)"
-                gradient="from-violet-400 to-purple-500"
-                bgClass="bg-violet-100 dark:bg-violet-900/30"
-              />
-              {/* Проверок качества */}
-              <StatCard
-                icon="🔍"
-                value={stats?.reviews_count ?? 0}
-                label="Проверок качества"
-                gradient="from-amber-400 to-orange-500"
-                bgClass="bg-amber-100 dark:bg-amber-900/30"
-              />
+              <StatCard icon="✅" value={stats?.completed_tasks ?? 0} label="Выполнено задач" gradient="from-blue-400 to-indigo-500" bgClass="bg-blue-100 dark:bg-blue-900/30" />
+              <StatCard icon="📝" value={stats?.total_annotations ?? 0} label="Всего аннотаций" gradient="from-emerald-400 to-green-500" bgClass="bg-emerald-100 dark:bg-emerald-900/30" />
+              <StatCard icon="🎯" value={`${((stats?.average_f1 ?? 0) * 100).toFixed(1)}%`} label="Средняя точность (F1)" gradient="from-violet-400 to-purple-500" bgClass="bg-violet-100 dark:bg-violet-900/30" />
+              <StatCard icon="🔍" value={stats?.reviews_count ?? 0} label="Проверок качества" gradient="from-amber-400 to-orange-500" bgClass="bg-amber-100 dark:bg-amber-900/30" />
             </div>
           )}
         </>
       )}
 
-      {/* ========== Базовая информация ========== */}
+      {/* Информация */}
       <div className="rounded-2xl bg-white dark:bg-gray-900 shadow-lg border border-gray-200 dark:border-gray-700 p-8">
-        <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-6 flex items-center gap-2">
-          ℹ️ Информация
-        </h2>
+        <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-6 flex items-center gap-2">ℹ️ Информация</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-4">
             <InfoRow label="Имя пользователя" value={user?.username ?? "—"} />
@@ -340,25 +235,13 @@ export function ProfilePage() {
   );
 }
 
-// Компонент карточки статистики
-function StatCard({ icon, value, label, gradient, bgClass }: {
-  icon: string;
-  value: number | string;
-  label: string;
-  gradient: string;
-  bgClass: string;
-}) {
+function StatCard({ icon, value, label, gradient, bgClass }: { icon: string; value: number | string; label: string; gradient: string; bgClass: string }) {
   return (
     <div className="relative overflow-hidden rounded-xl bg-white dark:bg-gray-900 shadow-lg border border-gray-200 dark:border-gray-700 p-6 group hover:shadow-xl transition-all duration-300">
       <div className={`absolute inset-0 bg-gradient-to-br ${gradient} opacity-5 group-hover:opacity-10 transition-opacity`} />
       <div className="relative space-y-3">
-        <div className={`w-12 h-12 rounded-xl ${bgClass} flex items-center justify-center text-2xl`}>
-          {icon}
-        </div>
-        <div>
-          <p className="text-3xl font-bold text-gray-900 dark:text-white">{value}</p>
-          <p className="text-sm text-gray-600 dark:text-gray-400">{label}</p>
-        </div>
+        <div className={`w-12 h-12 rounded-xl ${bgClass} flex items-center justify-center text-2xl`}>{icon}</div>
+        <div><p className="text-3xl font-bold text-gray-900 dark:text-white">{value}</p><p className="text-sm text-gray-600 dark:text-gray-400">{label}</p></div>
       </div>
     </div>
   );
@@ -367,7 +250,7 @@ function StatCard({ icon, value, label, gradient, bgClass }: {
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">{label}</span>
+      <span className="text-xs text-gray-500 uppercase tracking-wider">{label}</span>
       <span className="text-sm font-medium text-gray-900 dark:text-white">{value}</span>
     </div>
   );

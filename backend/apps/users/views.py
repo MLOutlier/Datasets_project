@@ -704,3 +704,133 @@ def avatar_delete_view(request):
     user.save()
     
     return Response({'message': 'Аватар удалён'})
+
+# =============================================================================
+# УВЕДОМЛЕНИЯ
+# =============================================================================
+from .notifications import Notification, create_notification
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def notifications_list(request):
+    """
+    Получить список уведомлений текущего пользователя.
+    GET /api/users/notifications/
+    
+    Query params:
+    - limit: количество (по умолчанию 20)
+    - offset: смещение
+    - unread_only: только непрочитанные (true/false)
+    """
+    try:
+        user = authenticate_from_jwt(request)
+    except PermissionError as e:
+        return Response({'detail': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    try:
+        limit = min(int(request.query_params.get('limit', 20)), 100)
+        offset = int(request.query_params.get('offset', 0))
+        unread_only = request.query_params.get('unread_only', '').lower() == 'true'
+    except ValueError:
+        limit = 20
+        offset = 0
+        unread_only = False
+    
+    query = {'user': user}
+    if unread_only:
+        query['is_read'] = False
+    
+    total = Notification.objects(**query).count()
+    notifications = list(
+        Notification.objects(**query)
+        .order_by('-created_at')
+        .skip(offset)
+        .limit(limit)
+    )
+    
+    unread_count = Notification.objects(user=user, is_read=False).count()
+    
+    return Response({
+        'items': [
+            {
+                'id': str(n.id),
+                'type': n.type,
+                'title': n.title,
+                'message': n.message,
+                'data': n.data,
+                'is_read': n.is_read,
+                'created_at': n.created_at.isoformat(),
+                'read_at': n.read_at.isoformat() if n.read_at else None,
+            }
+            for n in notifications
+        ],
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+        'unread_count': unread_count,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def notifications_unread_count(request):
+    """
+    Получить количество непрочитанных уведомлений.
+    GET /api/users/notifications/unread/count/
+    """
+    try:
+        user = authenticate_from_jwt(request)
+    except PermissionError as e:
+        return Response({'detail': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    count = Notification.objects(user=user, is_read=False).count()
+    return Response({'unread_count': count})
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def notification_mark_read(request, notification_id: str):
+    """
+    Отметить уведомление как прочитанное.
+    POST /api/users/notifications/{id}/read/
+    """
+    try:
+        user = authenticate_from_jwt(request)
+    except PermissionError as e:
+        return Response({'detail': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    if not ObjectId.is_valid(notification_id):
+        return Response({'detail': 'Invalid notification id'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    notification = Notification.objects(id=ObjectId(notification_id), user=user).first()
+    if not notification:
+        return Response({'detail': 'Notification not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    notification.mark_as_read()
+    
+    return Response({
+        'id': str(notification.id),
+        'is_read': notification.is_read,
+        'read_at': notification.read_at.isoformat() if notification.read_at else None,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def notifications_mark_all_read(request):
+    """
+    Отметить все уведомления как прочитанные.
+    POST /api/users/notifications/read-all/
+    """
+    try:
+        user = authenticate_from_jwt(request)
+    except PermissionError as e:
+        return Response({'detail': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    updated = Notification.objects(user=user, is_read=False).update(
+        is_read=True,
+        read_at=datetime.utcnow()
+    )
+    
+    return Response({'updated_count': updated})

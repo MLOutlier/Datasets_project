@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 TASK_VIDEO_ANNOTATION = "video_annotation"
 TASK_VIDEO_INTERVAL_VALIDATION = "video_interval_validation"
 TASK_BBOX_ANNOTATION = "bbox_annotation"
@@ -67,8 +66,8 @@ class TaskTypeSpec:
 TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     TASK_VIDEO_ANNOTATION: TaskTypeSpec(
         value=TASK_VIDEO_ANNOTATION,
-        title="Video interval annotation",
-        description="Executors mark relevant intervals in uploaded videos.",
+        title="Разметка интервалов видео",
+        description="Исполнители выделяют интервалы на загруженных видео.",
         default_widget=WIDGET_VIDEO_INTERVALS,
         widgets=(WIDGET_VIDEO_INTERVALS,),
         annotation_type="bbox",
@@ -79,8 +78,8 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     ),
     TASK_VIDEO_INTERVAL_VALIDATION: TaskTypeSpec(
         value=TASK_VIDEO_INTERVAL_VALIDATION,
-        title="Video interval validation",
-        description="Executors validate intervals from a video annotation source project.",
+        title="Валидация интервалов видео",
+        description="Исполнители проверяют интервалы из проекта-источника.",
         default_widget=WIDGET_INTERVAL_VALIDATION,
         widgets=(WIDGET_INTERVAL_VALIDATION,),
         annotation_type="bbox",
@@ -92,8 +91,8 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     ),
     TASK_BBOX_ANNOTATION: TaskTypeSpec(
         value=TASK_BBOX_ANNOTATION,
-        title="Bounding box annotation",
-        description="Executors draw bounding boxes on uploaded images or frames.",
+        title="Bounding box разметка",
+        description="Исполнители рисуют ограничивающие рамки на изображениях или кадрах.",
         default_widget=WIDGET_BBOX,
         widgets=(WIDGET_BBOX,),
         annotation_type="bbox",
@@ -104,8 +103,8 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     ),
     TASK_BBOX_VALIDATION: TaskTypeSpec(
         value=TASK_BBOX_VALIDATION,
-        title="Bounding box validation",
-        description="Executors validate final boxes from a bbox annotation source project.",
+        title="Bounding box валидация",
+        description="Исполнители проверяют готовые рамки из проекта-источника.",
         default_widget=WIDGET_BBOX_VALIDATION,
         widgets=(WIDGET_BBOX_VALIDATION,),
         annotation_type="bbox",
@@ -117,8 +116,8 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     ),
     TASK_TEXT_ANNOTATION: TaskTypeSpec(
         value=TASK_TEXT_ANNOTATION,
-        title="Text annotation",
-        description="Executors submit a free-form text answer.",
+        title="Текстовая разметка",
+        description="Исполнители вводят произвольный текст.",
         default_widget=WIDGET_TEXT,
         widgets=(WIDGET_TEXT,),
         annotation_type="generic",
@@ -130,8 +129,8 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     ),
     TASK_IMAGE_ANNOTATION: TaskTypeSpec(
         value=TASK_IMAGE_ANNOTATION,
-        title="Image labeling",
-        description="Executors choose labels for uploaded images without drawing boxes.",
+        title="Разметка изображений",
+        description="Исполнители выбирают метки для загруженных изображений без рисования рамок.",
         default_widget=WIDGET_IMAGE_LABELS,
         widgets=(WIDGET_IMAGE_LABELS,),
         annotation_type="generic",
@@ -143,8 +142,8 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     ),
     TASK_CLASSIFICATION: TaskTypeSpec(
         value=TASK_CLASSIFICATION,
-        title="Classification",
-        description="Executors choose one class from the project label schema.",
+        title="Классификация",
+        description="Исполнители выбирают один класс из схемы меток проекта.",
         default_widget=WIDGET_CLASSIFICATION,
         widgets=(WIDGET_CLASSIFICATION,),
         annotation_type="generic",
@@ -156,8 +155,8 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
     ),
     TASK_COMPARISON: TaskTypeSpec(
         value=TASK_COMPARISON,
-        title="Comparison",
-        description="Executors choose between option A and option B.",
+        title="Сравнение",
+        description="Исполнители выбирают между вариантом A и B.",
         default_widget=WIDGET_COMPARISON,
         widgets=(WIDGET_COMPARISON,),
         annotation_type="generic",
@@ -170,9 +169,9 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
 }
 
 TASK_TYPE_CHOICES = tuple((key, key) for key in TASK_TYPE_SPECS)
+
 WIDGET_TYPE_CHOICES = tuple(
-    (widget, widget)
-    for widget in sorted({widget for spec in TASK_TYPE_SPECS.values() for widget in spec.widgets})
+    (widget, widget) for widget in sorted({widget for spec in TASK_TYPE_SPECS.values() for widget in spec.widgets})
 )
 
 
@@ -205,10 +204,7 @@ def task_type_registry_payload() -> dict:
         "default_widget_type": WIDGET_BBOX,
         "task_types": [spec.to_dict() for spec in TASK_TYPE_SPECS.values()],
         "widgets": [
-            {
-                "value": widget,
-                "title": widget.replace("_", " ").title(),
-            }
+            {"value": widget, "title": widget.replace("_", " ").title()}
             for widget in widgets
         ],
     }

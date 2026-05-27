@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 GENERIC_EXPORT_FORMATS = {"json", "jsonl", "csv", "both"}
 CV_EXPORT_FORMATS = {"coco", "yolo", "voc", "tfrecord", "csv", "json", "jsonl", "both"}
+CV_ARTIFACT_EXPORT_FORMATS = {"json", "jsonl", "csv", "both"}
+CV_EXPORT_ARTIFACTS = {"raw_annotations", "consensus_annotations", "validated_dataset", "validation_report"}
 
 
 def _request_param(request, name: str, default: str = "") -> str:
@@ -75,9 +77,21 @@ def export_project_dataset(project_id, user, request, entrypoint: str = "project
             return error_response
 
         export_format = (_request_param(request, "format") or "both").strip().lower()
-        logger.info("Export format: %s", export_format)
+        artifact = (_request_param(request, "artifact") or "validated_dataset").strip().lower()
+        logger.info("Export format: %s, artifact: %s", export_format, artifact)
+
+        if artifact not in CV_EXPORT_ARTIFACTS:
+            return Response(
+                {"detail": "Invalid export artifact. Use raw_annotations, consensus_annotations, validated_dataset or validation_report"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if is_generic_task_project(project):
+            if artifact != "validated_dataset":
+                return Response(
+                    {"detail": "Generic projects currently support only the default validated_dataset export artifact"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if export_format not in GENERIC_EXPORT_FORMATS:
                 return Response(
                     {"detail": "Invalid generic export format. Use json, jsonl, csv or both"},
@@ -85,7 +99,7 @@ def export_project_dataset(project_id, user, request, entrypoint: str = "project
                 )
             if _as_archive(request):
                 archive_name, archive_bytes = build_generic_project_export_archive(project, export_format=export_format)
-                _log_export(project, user, export_format, entrypoint, archive=True, filename=archive_name, generic=True)
+                _log_export(project, user, export_format, entrypoint, archive=True, filename=archive_name, generic=True, artifact=artifact)
                 return _zip_response(archive_name, archive_bytes)
             payload = build_generic_project_export(project, export_format=export_format)
             _log_export(
@@ -96,7 +110,24 @@ def export_project_dataset(project_id, user, request, entrypoint: str = "project
                 archive=False,
                 version=payload.get("export_version"),
                 generic=True,
+                artifact=artifact,
             )
+            return Response(payload, status=status.HTTP_200_OK)
+
+        if artifact != "validated_dataset":
+            if export_format not in CV_ARTIFACT_EXPORT_FORMATS:
+                return Response(
+                    {"detail": "Invalid artifact export format. Use json, jsonl, csv or both"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            from apps.cv_annotation.services.workflow import build_project_artifact_export, build_project_artifact_export_archive
+
+            if _as_archive(request):
+                archive_name, archive_bytes = build_project_artifact_export_archive(project, artifact=artifact, export_format=export_format)
+                _log_export(project, user, export_format, entrypoint, archive=True, filename=archive_name, artifact=artifact)
+                return _zip_response(archive_name, archive_bytes)
+            payload = build_project_artifact_export(project, artifact=artifact, export_format=export_format)
+            _log_export(project, user, export_format, entrypoint, archive=False, version=payload.get("export_version"), artifact=artifact)
             return Response(payload, status=status.HTTP_200_OK)
 
         if export_format not in CV_EXPORT_FORMATS:
@@ -110,18 +141,18 @@ def export_project_dataset(project_id, user, request, entrypoint: str = "project
             path, filename, warnings = export_tfrecord(bundle)
             response = FileResponse(open(path, "rb"), content_type="application/octet-stream", as_attachment=True, filename=filename)
             response["X-Export-Warnings"] = str(int(warnings))
-            _log_export(project, user, export_format, entrypoint, archive=True, filename=filename, warnings=warnings)
+            _log_export(project, user, export_format, entrypoint, archive=True, filename=filename, warnings=warnings, artifact=artifact)
             return response
 
         from apps.cv_annotation.services.workflow import build_dataset_export, build_dataset_export_archive
 
         if _as_archive(request):
             archive_name, archive_bytes = build_dataset_export_archive(project, export_format=export_format)
-            _log_export(project, user, export_format, entrypoint, archive=True, filename=archive_name)
+            _log_export(project, user, export_format, entrypoint, archive=True, filename=archive_name, artifact=artifact)
             return _zip_response(archive_name, archive_bytes)
 
         payload = build_dataset_export(project, export_format=export_format)
-        _log_export(project, user, export_format, entrypoint, archive=False, version=payload.get("export_version"))
+        _log_export(project, user, export_format, entrypoint, archive=False, version=payload.get("export_version"), artifact=artifact)
         return Response(payload, status=status.HTTP_200_OK)
 
     except Exception as exc:

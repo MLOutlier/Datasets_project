@@ -12,6 +12,7 @@ from ..users.models import User
 from ..users.views import authenticate_from_jwt
 from .models import PaymentRequest, Transaction
 from .serializers import PaymentSerializer, TransactionSerializer
+from apps.users.notification_utils import notify_payment_received, notify_payment_sent
 
 
 class JWTRequiredMixin:
@@ -168,6 +169,10 @@ class PaymentViewSet(JWTRequiredMixin, ViewSet):
             description=description or f"Перевод пользователю {to_user.username}",
         )
         tx.save()
+
+        # ✅ Добавить уведомления о переводе
+        notify_payment_received(to_user, float(amount))
+        notify_payment_sent(user, float(amount), to_user)
 
         # Обновляем балансы
         user_coll = User._get_collection()

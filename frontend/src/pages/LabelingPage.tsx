@@ -4,11 +4,20 @@ import { useQuery } from "@tanstack/react-query";
 import { annotatorAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
-import { getTaskGroupLabel } from "../lib/taskFlowCopy";
+
+// В начале файла, после импортов, добавь:
+const STATUS_LABELS: Record<string, string> = {
+  active: "Активный",
+  open: "Открыт",
+  closed: "Закрыт",
+  pending: "Ожидает",
+  in_progress: "В работе",
+  completed: "Завершён",
+};
 
 type ProjectTab = "available" | "active" | "completed";
 
-const stageTitles: Record<string, string> = {
+const STAGE_TITLES: Record<string, string> = {
   video_annotation: "Разметка видео",
   video_interval_validation: "Валидация интервалов",
   bbox_annotation: "Разметка объектов",
@@ -20,7 +29,21 @@ const stageTitles: Record<string, string> = {
 };
 
 function stageTitle(project: any) {
-  return stageTitles[project.stage] ?? project.stage_title ?? project.project_title;
+  return STAGE_TITLES[project.stage] ?? project.stage_title ?? project.project_title;
+}
+
+function taskGroupLabel(taskType: string) {
+  const map: Record<string, string> = {
+    video_annotation: "Видео",
+    video_interval_validation: "Видео",
+    bbox_annotation: "BBox",
+    bbox_validation: "BBox",
+    text_annotation: "Текст",
+    image_annotation: "Изображения",
+    classification: "Классификация",
+    comparison: "Сравнение",
+  };
+  return map[taskType] ?? taskType;
 }
 
 export function LabelingPage() {
@@ -37,84 +60,67 @@ export function LabelingPage() {
     return (
       <div className="card p-8 text-center">
         <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Проекты разметки</h1>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Этот раздел доступен исполнителям и администраторам.</p>
+        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Этот раздел доступен только исполнителям и администраторам.</p>
       </div>
     );
   }
 
-  const availableProjects = projectsQuery.data?.available_projects ?? [];
-  const activeProjects = projectsQuery.data?.active_projects ?? [];
-  const completedProjects = projectsQuery.data?.completed_projects ?? [];
-  const visibleProjects = tab === "available" ? availableProjects : tab === "active" ? activeProjects : completedProjects;
+  const available = projectsQuery.data?.available_projects ?? [];
+  const active = projectsQuery.data?.active_projects ?? [];
+  const completed = projectsQuery.data?.completed_projects ?? [];
+  const visible = tab === "available" ? available : tab === "active" ? active : completed;
 
   return (
     <div className="space-y-6">
       <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-white">Проекты для разметки</h1>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-          Каждый проект здесь является самостоятельным типом задания со своим виджетом и очередью.
+          Каждый проект — самостоятельный тип задания со своим интерфейсом и очередью.
         </p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Доступные этапы</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{availableProjects.length}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Активные этапы</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{activeProjects.length}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Заданий в очереди</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">
-            {availableProjects.reduce((sum, item) => sum + Number(item.available_count || 0), 0) +
-              activeProjects.reduce((sum, item) => sum + Number(item.active_count || 0), 0)}
-          </div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Завершенные этапы</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{completedProjects.length}</div>
-        </div>
+        <StatCard label="Доступные этапы" value={available.length} />
+        <StatCard label="Активные этапы" value={active.length} />
+        <StatCard label="Заданий в очереди" value={
+          available.reduce((s, i) => s + Number(i.available_count || 0), 0) +
+          active.reduce((s, i) => s + Number(i.active_count || 0), 0)
+        } />
+        <StatCard label="Завершённые этапы" value={completed.length} />
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <button type="button" className={`btn-secondary ${tab === "available" ? "ring-2 ring-blue-400" : ""}`} onClick={() => setTab("available")}>
-          Доступные
-        </button>
-        <button type="button" className={`btn-secondary ${tab === "active" ? "ring-2 ring-blue-400" : ""}`} onClick={() => setTab("active")}>
-          Активные
-        </button>
-        <button type="button" className={`btn-secondary ${tab === "completed" ? "ring-2 ring-blue-400" : ""}`} onClick={() => setTab("completed")}>
-          Завершенные
-        </button>
+        {(["available", "active", "completed"] as ProjectTab[]).map((t) => (
+          <button
+            key={t}
+            type="button"
+            className={`btn-secondary ${tab === t ? "ring-2 ring-blue-400" : ""}`}
+            onClick={() => setTab(t)}
+          >
+            {t === "available" ? "Доступные" : t === "active" ? "Активные" : "Завершённые"}
+          </button>
+        ))}
       </div>
 
       {projectsQuery.isLoading ? (
-        <div className="card flex justify-center p-10">
-          <LoadingSpinner size="lg" />
-        </div>
+        <div className="card flex justify-center p-10"><LoadingSpinner size="lg" /></div>
       ) : projectsQuery.isError ? (
         <div className="card p-10 text-center">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Не удалось загрузить проекты</h2>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-            {(projectsQuery.error as any)?.response?.data?.detail || (projectsQuery.error as Error)?.message || "Проверьте доступность backend и попробуйте еще раз."}
-          </p>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Проверьте подключение к серверу.</p>
         </div>
-      ) : visibleProjects.length === 0 ? (
+      ) : visible.length === 0 ? (
         <div className="card p-10 text-center">
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">В этой вкладке пока пусто</h2>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Пока пусто</h2>
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-            {tab === "available"
-              ? "Здесь появятся этапы с новыми заданиями."
-              : tab === "active"
-                ? "Здесь будут этапы, по которым уже начата работа или ожидается следующий шаг workflow."
-                : "Завершенные этапы остаются здесь, чтобы связь с проектом не исчезала после последнего задания."}
+            {tab === "available" ? "Здесь появятся новые этапы для разметки." :
+             tab === "active" ? "Здесь будут этапы, по которым уже начата работа." :
+             "Завершённые этапы остаются здесь для истории."}
           </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {visibleProjects.map((project) => {
+          {visible.map((project) => {
             const completedCount = Number(project.completed_count ?? Number(project.accepted_count || 0) + Number(project.rejected_count || 0));
             return (
               <div key={project.stage_project_id ?? `${project.project_id}:${project.stage ?? "parent"}`} className="card space-y-4">
@@ -122,34 +128,28 @@ export function LabelingPage() {
                   <div>
                     <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
                       <span>{project.project_status}</span>
-                      <span>· {getTaskGroupLabel(project.task_type || project.stage)}</span>
+                      <span>· {taskGroupLabel(project.task_type || project.stage)}</span>
                       <span>· {project.widget_type ?? "widget"}</span>
                     </div>
                     <h2 className="mt-1 text-xl font-semibold text-gray-900 dark:text-white">{stageTitle(project)}</h2>
                   </div>
                   <span className="badge badge-warning">
-                    {tab === "active"
-                      ? `${project.active_count} в работе`
-                      : tab === "completed"
-                        ? `${completedCount} завершено`
-                        : `${project.available_count} доступно`}
+                    {tab === "active" ? `${project.active_count} в работе` :
+                     tab === "completed" ? `${completedCount} завершено` :
+                     `${project.available_count} доступно`}
                   </span>
                 </div>
-
                 <div className="text-sm text-gray-600 line-clamp-3 dark:text-gray-400">
-                  {project.instructions || "Инструкция проекта пока не заполнена."}
+                  {project.instructions || "Инструкция пока не добавлена."}
                 </div>
-
                 <div className="flex flex-wrap gap-2 text-xs text-gray-500 dark:text-gray-400">
                   <span>{project.linked_project_title ?? project.project_title}</span>
                   <span>{project.label_schema.length} меток</span>
-                  <span>{project.total_assignments} заданий всего</span>
+                  <span>{project.total_assignments} заданий</span>
                   <span>{project.active_count} в работе</span>
                   <span>{project.submitted_count} отправлено</span>
                   <span>{project.accepted_count} принято</span>
-                  {tab === "completed" ? <span>{project.rejected_count} отклонено</span> : null}
                 </div>
-
                 <div className="flex justify-end">
                   <Link to={project.route || `/labeling/projects/${project.project_id}`} className="btn-primary">
                     Открыть этап
@@ -160,6 +160,15 @@ export function LabelingPage() {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="card">
+      <div className="text-sm text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{value}</div>
     </div>
   );
 }

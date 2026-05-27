@@ -13,16 +13,19 @@ export default function AnnotatorProjectPage() {
     queryFn: () => annotatorAPI.projectDetail(projectId!),
     enabled: !!projectId,
   });
+
   const intervalChunkQuery = useQuery({
     queryKey: ["interval-chunk-queue", projectId],
     queryFn: () => annotatorAPI.intervalChunkQueue(),
     enabled: !!projectId,
   });
+
   const intervalValidationQuery = useQuery({
     queryKey: ["interval-validation-queue", projectId],
     queryFn: () => annotatorAPI.intervalValidationQueue(),
     enabled: !!projectId,
   });
+
   const bboxValidationQuery = useQuery({
     queryKey: ["bbox-validation-queue", projectId],
     queryFn: () => annotatorAPI.bboxValidationQueue(),
@@ -31,22 +34,15 @@ export default function AnnotatorProjectPage() {
 
   const nextAssignmentMutation = useMutation({
     mutationFn: () => annotatorAPI.nextProjectAssignment(projectId!),
-    onSuccess: (result) => {
-      navigate(`/labeling/assignments/${result.assignment_id}`);
-    },
+    onSuccess: (result) => navigate(`/labeling/assignments/${result.assignment_id}`),
   });
 
-  if (projectQuery.isLoading) {
-    return <LoadingSpinner size="lg" />;
-  }
-
+  if (projectQuery.isLoading) return <LoadingSpinner size="lg" />;
   if (!projectQuery.data) {
     return (
       <div className="card p-8 text-center">
-        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Проект не найден</h1>
-        <Link to="/labeling" className="btn-primary mt-4 inline-block">
-          К проектам
-        </Link>
+        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">❌ Проект не найден</h1>
+        <Link to="/labeling" className="btn-primary mt-4 inline-block">← К проектам</Link>
       </div>
     );
   }
@@ -54,7 +50,7 @@ export default function AnnotatorProjectPage() {
   const project = projectQuery.data;
   const taskType = String(project.task_type || "bbox_annotation");
   const taskCopy = getTaskFlowCopy(taskType);
-  const taskGroupLabel = getTaskGroupLabel(taskType);
+  const taskGroupLabelVal = getTaskGroupLabel(taskType);
   const primaryActionLabel = project.active_assignment_id ? "Продолжить разметку" : project.next_assignment_id ? "Начать разметку" : "Нет доступных заданий";
   const intervalChunkCount = (intervalChunkQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
   const intervalValidationCount = (intervalValidationQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
@@ -64,178 +60,123 @@ export default function AnnotatorProjectPage() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{project.project_status}</div>
+          <div className="text-xs uppercase tracking-wide text-gray-500">{project.project_status === "active" ? "Активен" : project.project_status}</div>
           <h1 className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.project_title}</h1>
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{project.description || "Описание проекта пока не добавлено."}</p>
         </div>
-        <Link to="/labeling" className="btn-secondary">
-          К проектам
-        </Link>
+        <Link to="/labeling" className="btn-secondary">← К проектам</Link>
       </div>
 
       <div className={`rounded-lg border p-4 ${taskCopy.group === "video" ? "border-blue-200 bg-blue-50 text-blue-950 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100" : "border-gray-200 bg-gray-50 text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"}`}>
-        <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{taskGroupLabel}</div>
+        <div className="text-xs uppercase tracking-wide text-gray-500">{taskGroupLabelVal}</div>
         <div className="mt-1 text-lg font-semibold">{taskCopy.projectTitle}</div>
         <div className="mt-2 text-sm opacity-90">{taskCopy.projectDescription}</div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Доступно</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.available_count}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">В работе</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.active_count}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Отправлено</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.submitted_count}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Принято</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.accepted_count}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Отклонено</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.rejected_count}</div>
-        </div>
+        <StatItem label="Доступно" value={project.stats.available_count} />
+        <StatItem label="В работе" value={project.stats.active_count} />
+        <StatItem label="Отправлено" value={project.stats.submitted_count} />
+        <StatItem label="Принято" value={project.stats.accepted_count} />
+        <StatItem label="Отклонено" value={project.stats.rejected_count} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Пакеты заданий</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.batch_count}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Кадры для валидации</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.validation_ready_count}</div>
-        </div>
-        <div className="card">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Завершено</div>
-          <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.completed_count}</div>
-        </div>
+        <StatItem label="Пакеты заданий" value={project.stats.batch_count} />
+        <StatItem label="Кадры для валидации" value={project.stats.validation_ready_count} />
+        <StatItem label="Завершено" value={project.stats.completed_count} />
       </div>
 
       <div className="card space-y-4">
         <div>
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Задание проекта</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-            Проект использует один тип задания и один основной виджет.
-          </p>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">📋 Задание проекта</h2>
+          <p className="mt-1 text-sm text-gray-600">Проект использует один тип задания и один основной виджет.</p>
         </div>
+
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {taskType === "video_annotation" ? (
-            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=intervals`} className="rounded-lg border border-blue-200 bg-blue-50 p-4 transition hover:border-blue-300 dark:border-blue-900 dark:bg-blue-950 dark:hover:border-blue-700">
-              <div className="text-sm text-gray-500 dark:text-gray-400">Виджет</div>
-              <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Интервалы видео</div>
-              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{taskCopy.annotatorDescription}</div>
-              <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{intervalChunkCount}</div>
+          {taskType === "video_annotation" && (
+            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=intervals`} className="rounded-lg border border-blue-200 bg-blue-50 p-4 transition hover:border-blue-300">
+              <div className="text-sm text-gray-500">Виджет</div>
+              <div className="mt-2 text-lg font-semibold text-gray-900">Интервалы видео</div>
+              <div className="mt-1 text-sm text-gray-600">{taskCopy.annotatorDescription}</div>
+              <div className="mt-3 text-3xl font-bold text-gray-900">{intervalChunkCount}</div>
             </Link>
-          ) : null}
-          {taskType === "video_interval_validation" ? (
-            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=interval-validation`} className="rounded-lg border border-blue-200 bg-blue-50 p-4 transition hover:border-blue-300 dark:border-blue-900 dark:bg-blue-950 dark:hover:border-blue-700">
-              <div className="text-sm text-gray-500 dark:text-gray-400">Виджет</div>
-              <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">Валидация интервалов</div>
-              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{taskCopy.annotatorDescription}</div>
-              <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{intervalValidationCount}</div>
+          )}
+          {taskType === "video_interval_validation" && (
+            <Link to={`/labeling/intervals?projectId=${project.project_id}&stage=interval-validation`} className="rounded-lg border border-blue-200 bg-blue-50 p-4 transition hover:border-blue-300">
+              <div className="text-sm text-gray-500">Виджет</div>
+              <div className="mt-2 text-lg font-semibold text-gray-900">Валидация интервалов</div>
+              <div className="mt-1 text-sm text-gray-600">{taskCopy.annotatorDescription}</div>
+              <div className="mt-3 text-3xl font-bold text-gray-900">{intervalValidationCount}</div>
             </Link>
-          ) : null}
-          {taskType === "bbox_annotation" ? (
+          )}
+          {taskType === "bbox_annotation" && (
             <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-800">
-              <div className="text-sm text-gray-500 dark:text-gray-400">Виджет</div>
-              <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">BBox-разметка</div>
-              <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.available_count + project.stats.active_count}</div>
-              <button
-                type="button"
-                className="btn-primary mt-4 w-full"
-                onClick={() => nextAssignmentMutation.mutate()}
-                disabled={nextAssignmentMutation.isPending || (!project.active_assignment_id && !project.next_assignment_id)}
-              >
+              <div className="text-sm text-gray-500">Виджет</div>
+              <div className="mt-2 text-lg font-semibold text-gray-900">BBox-разметка</div>
+              <div className="mt-3 text-3xl font-bold text-gray-900">{project.stats.available_count + project.stats.active_count}</div>
+              <button className="btn-primary mt-4 w-full" onClick={() => nextAssignmentMutation.mutate()} disabled={nextAssignmentMutation.isPending || (!project.active_assignment_id && !project.next_assignment_id)}>
                 {nextAssignmentMutation.isPending ? "Открываем..." : primaryActionLabel}
               </button>
             </div>
-          ) : null}
-          {taskType === "bbox_validation" ? (
-            <Link to={`/labeling/bbox-validation?projectId=${project.project_id}`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300 dark:border-gray-800 dark:hover:border-blue-700">
-              <div className="text-sm text-gray-500 dark:text-gray-400">Виджет</div>
-              <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">BBox-валидация</div>
-              <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{bboxValidationCount}</div>
+          )}
+          {taskType === "bbox_validation" && (
+            <Link to={`/labeling/bbox-validation?projectId=${project.project_id}`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300">
+              <div className="text-sm text-gray-500">Виджет</div>
+              <div className="mt-2 text-lg font-semibold text-gray-900">BBox-валидация</div>
+              <div className="mt-3 text-3xl font-bold text-gray-900">{bboxValidationCount}</div>
             </Link>
-          ) : null}
-          {["text_annotation", "image_annotation", "classification", "comparison"].includes(taskType) ? (
-            <Link to={`/labeling/generic/${project.project_id}`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300 dark:border-gray-800 dark:hover:border-blue-700">
-              <div className="text-sm text-gray-500 dark:text-gray-400">Виджет</div>
-              <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">{String(project.widget_type || "generic")}</div>
-              <div className="mt-3 text-3xl font-bold text-gray-900 dark:text-white">{project.stats.available_count + project.stats.active_count}</div>
+          )}
+          {["text_annotation", "image_annotation", "classification", "comparison"].includes(taskType) && (
+            <Link to={`/labeling/generic/${project.project_id}`} className="rounded-lg border border-gray-200 p-4 transition hover:border-blue-300">
+              <div className="text-sm text-gray-500">Виджет</div>
+              <div className="mt-2 text-lg font-semibold text-gray-900">{String(project.widget_type || "generic")}</div>
+              <div className="mt-3 text-3xl font-bold text-gray-900">{project.stats.available_count + project.stats.active_count}</div>
             </Link>
-          ) : null}
+          )}
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr,0.42fr]">
         <div className="card space-y-4">
-          <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Instructions</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-              Перед началом внимательно прочитайте инструкцию. После этого система будет показывать ваши кадры по очереди.
-            </p>
-          </div>
-
+          <h2 className="text-xl font-semibold text-gray-900">📖 Инструкция</h2>
+          <p className="text-sm text-gray-600">Перед началом внимательно прочитайте инструкцию. После этого система будет показывать ваши кадры по очереди.</p>
           <div className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
             {project.instructions || "Инструкция пока не добавлена."}
           </div>
-
-          {project.instructions_file_uri ? (
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-gray-950">
-              <div className="font-medium text-gray-900 dark:text-white">Прикрепленный файл инструкции</div>
-              <div className="mt-2">
-                <a className="text-blue-600 hover:underline dark:text-blue-400" href={project.instructions_file_uri} target="_blank" rel="noreferrer">
-                  {project.instructions_file_name || "инструкция"}
-                </a>
-              </div>
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                v{project.instructions_version ?? 0}
-                {project.instructions_updated_at ? ` | ${new Date(project.instructions_updated_at).toLocaleString()}` : ""}
-              </div>
+          {project.instructions_file_uri && (
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+              <div className="font-medium text-gray-900">📎 Прикреплённый файл инструкции</div>
+              <a className="mt-2 block text-blue-600 hover:underline" href={project.instructions_file_uri} target="_blank" rel="noreferrer">{project.instructions_file_name || "инструкция"}</a>
+              <div className="mt-1 text-xs text-gray-500">v{project.instructions_version ?? 0}{project.instructions_updated_at ? ` | ${new Date(project.instructions_updated_at).toLocaleString()}` : ""}</div>
             </div>
-          ) : null}
-
-          {taskType === "bbox_annotation" ? (
+          )}
+          {taskType === "bbox_annotation" && (
             <div className="flex justify-end">
-              <button
-                type="button"
-                className="btn-primary"
-                onClick={() => nextAssignmentMutation.mutate()}
-                disabled={nextAssignmentMutation.isPending || (!project.active_assignment_id && !project.next_assignment_id)}
-              >
+              <button className="btn-primary" onClick={() => nextAssignmentMutation.mutate()} disabled={nextAssignmentMutation.isPending || (!project.active_assignment_id && !project.next_assignment_id)}>
                 {nextAssignmentMutation.isPending ? "Открываем..." : primaryActionLabel}
               </button>
             </div>
-          ) : null}
-          {nextAssignmentMutation.isError ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">Не удалось открыть следующее задание.</div>
-          ) : null}
+          )}
+          {nextAssignmentMutation.isError && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">Не удалось открыть следующее задание.</div>}
         </div>
 
         <div className="space-y-4">
           <div className="card space-y-3">
-            <div className="text-lg font-semibold text-gray-900 dark:text-white">Метки</div>
-            <div className="space-y-2">
-              {project.label_schema.map((label) => (
-                <div key={label.name} className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
-                  <div className="flex items-center gap-2">
-                    <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: label.color || "#2563eb" }} />
-                    <span className="font-medium text-gray-900 dark:text-white">{label.name}</span>
-                  </div>
-                  {label.description ? <div className="mt-2 text-sm text-gray-600 dark:text-gray-400">{label.description}</div> : null}
+            <div className="text-lg font-semibold text-gray-900">🏷️ Метки</div>
+            {project.label_schema.map((label) => (
+              <div key={label.name} className="rounded-lg border border-gray-200 p-3">
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: label.color || "#2563eb" }} />
+                  <span className="font-medium text-gray-900">{label.name}</span>
                 </div>
-              ))}
-            </div>
+                {label.description && <div className="mt-2 text-sm text-gray-600">{label.description}</div>}
+              </div>
+            ))}
           </div>
 
-          <div className="card space-y-2 text-sm text-gray-700 dark:text-gray-300">
-            <div className="text-lg font-semibold text-gray-900 dark:text-white">Параметры workflow</div>
+          <div className="card space-y-2 text-sm text-gray-700">
+            <div className="text-lg font-semibold text-gray-900">⚙️ Параметры workflow</div>
             <div>Интервал кадров: {project.frame_interval_sec} с</div>
             <div>Размер пакета: {Number(project.participant_rules?.task_batch_size || 10)} кадров</div>
             <div>Мин. длина последовательности: {Number(project.participant_rules?.min_sequence_size || 3)} кадра</div>
@@ -245,6 +186,15 @@ export default function AnnotatorProjectPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function StatItem({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="card">
+      <div className="text-sm text-gray-500">{label}</div>
+      <div className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{value}</div>
     </div>
   );
 }

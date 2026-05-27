@@ -5,7 +5,12 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 # Импорты ViewSet'ов для роутинга
-from apps.users.views import register, login, me_view, participants_view, user_stats_view, avatar_upload_view, avatar_delete_view, BulkCreateAnnotatorsView
+from apps.users.views import (
+    register, login, me_view, participants_view, user_stats_view, 
+    avatar_upload_view, avatar_delete_view, BulkCreateAnnotatorsView,
+    notifications_list, notifications_unread_count, 
+    notification_mark_read, notifications_mark_all_read  # ← новые
+)
 from apps.datasets_core.views import DatasetCollectionView, DatasetDetailView, DatasetExportView
 from apps.projects.views import ProjectViewSet, TaskViewSet
 from apps.labeling.views import AnnotationViewSet
@@ -42,17 +47,21 @@ urlpatterns = [
         path("users/me/avatar/", avatar_upload_view, name="avatar-upload"),
         path("users/me/avatar/delete/", avatar_delete_view, name="avatar-delete"),
         path("users/participants/", participants_view, name="user-participants"),
-        
+        path("users/notifications/", notifications_list, name="notifications-list"),
+        path("users/notifications/unread/count/", notifications_unread_count, name="notifications-unread-count"),
+        path("users/notifications/<str:notification_id>/read/", notification_mark_read, name="notification-mark-read"),
+        path("users/notifications/read-all/", notifications_mark_all_read, name="notifications-mark-all-read"),
+
         # ✅ МАССОВОЕ СОЗДАНИЕ АННОТАТОРОВ
         path("users/bulk-create-annotators/", BulkCreateAnnotatorsView.as_view(), name="bulk-create-annotators"),
 
         # Авторизация (function-based views)
         path("auth/register/", register, name="auth-register"),
         path("auth/login/", login, name="auth-login"),
-        
+
         # Остальные эндпоинты через router
     ] + router.urls)),
-    
+
     # Датасеты (отдельно, чтобы точно срабатывали)
     path("api/datasets/", DatasetCollectionView.as_view(), name="dataset-list"),
     path("api/datasets/<str:dataset_id>/", DatasetDetailView.as_view(), name="dataset-detail"),

@@ -18,6 +18,8 @@ import {
   Participant,
   PaymentRequestBody,
   Project,
+  ProjectExportArtifactName,
+  ProjectExportFormat,
   ProjectExportPayload,
   ProjectFinalizeResponse,
   ProjectImportResponse,
@@ -265,13 +267,13 @@ export const workflowAPI = {
     const res = await api.post<ProjectOverview>(`/api/projects/${projectId}/workflow/sync/`, {});
     return res.data;
   },
-  async export(projectId: string, format: "coco" | "yolo" | "voc" | "tfrecord" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<ProjectExportPayload> {
-    const res = await api.get<ProjectExportPayload>(`/api/cv/projects/${projectId}/export/`, { params: { format } });
+  async export(projectId: string, format: ProjectExportFormat = "both", artifact: ProjectExportArtifactName | string = "validated_dataset"): Promise<ProjectExportPayload> {
+    const res = await api.get<ProjectExportPayload>(`/api/cv/projects/${projectId}/export/`, { params: { format, artifact } });
     return res.data;
   },
-  async exportArchive(projectId: string, format: "coco" | "yolo" | "voc" | "tfrecord" | "csv" | "json" | "jsonl" | "both" = "both"): Promise<Blob> {
+  async exportArchive(projectId: string, format: ProjectExportFormat = "both", artifact: ProjectExportArtifactName | string = "validated_dataset"): Promise<Blob> {
     const res = await api.get(`/api/cv/projects/${projectId}/export/`, {
-      params: { format, download: "1" },
+      params: { format, artifact, download: "1" },
       responseType: "blob",
     });
     return res.data as Blob;
@@ -607,6 +609,29 @@ export const dawidSkeneAPI = {
     }>;
   }> {
     const res = await api.get(`/api/quality/project/${projectId}/dawid-skene/`);
+    return res.data;
+  },
+};
+
+// ------------------ Notifications API ------------------
+export const notificationsAPI = {
+  async list(params?: { limit?: number; offset?: number; unread_only?: boolean }): Promise<NotificationsResponse> {
+    const res = await api.get<NotificationsResponse>("/api/users/notifications/", { params });
+    return res.data;
+  },
+  
+  async unreadCount(): Promise<{ unread_count: number }> {
+    const res = await api.get<{ unread_count: number }>("/api/users/notifications/unread/count/");
+    return res.data;
+  },
+  
+  async markRead(notificationId: string): Promise<{ id: string; is_read: boolean; read_at: string | null }> {
+    const res = await api.post(`/api/users/notifications/${notificationId}/read/`);
+    return res.data;
+  },
+  
+  async markAllRead(): Promise<{ updated_count: number }> {
+    const res = await api.post("/api/users/notifications/read-all/");
     return res.data;
   },
 };

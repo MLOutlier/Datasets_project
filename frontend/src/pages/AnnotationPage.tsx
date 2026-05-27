@@ -102,14 +102,13 @@ export default function AnnotationPage() {
   useEffect(() => {
     if (!assignmentQuery.data) return;
     const draftBoxes = assignmentQuery.data.draft?.boxes ?? [];
-    const initialBoxes = draftBoxes;
-    setBoxes(initialBoxes);
+    setBoxes(draftBoxes);
     setComment(assignmentQuery.data.comment ?? "");
     setSelectedLabel(
       (assignmentQuery.data.label_schema?.[0]?.name as string | undefined) ??
         "",
     );
-    setSelectedBoxIndex(initialBoxes.length > 0 ? 0 : null);
+    setSelectedBoxIndex(draftBoxes.length > 0 ? 0 : null);
     setIsDirty(false);
   }, [assignmentQuery.data]);
 
@@ -154,31 +153,25 @@ export default function AnnotationPage() {
             assignmentQuery.data!.project_id,
           );
           navigate(`/labeling/assignments/${next.assignment_id}`);
-          return;
         } catch {
           navigate(`/labeling/projects/${assignmentQuery.data!.project_id}`);
-          return;
         }
       }
     },
   });
 
-  // ============================================================
-  // ⌨️ HOTKEYS — save, submit, navigate
-  // ============================================================
+  // ⌨️ Горячие клавиши: сохранение и отправка
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select") return;
 
-      // Ctrl+S — save draft
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
         e.preventDefault();
         submit(false);
         return;
       }
 
-      // Enter — final submit
       if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         submit(true);
@@ -206,9 +199,7 @@ export default function AnnotationPage() {
     return () => window.removeEventListener("keydown", handler);
   }, [boxes, comment, selectedLabel]);
 
-  // ============================================================
-  // Listen for custom events from AnnotationCanvas
-  // ============================================================
+  // 🏷️ Выбор метки с холста
   useEffect(() => {
     const onSelectLabel = (e: Event) => {
       const detail = (e as CustomEvent).detail;
@@ -221,11 +212,8 @@ export default function AnnotationPage() {
       window.removeEventListener("annotation:select-label", onSelectLabel);
   }, [labels]);
 
-  // ============================================================
-  // AUTO-SAVE (every 30 seconds)
-  // ============================================================
+  // 💾 Автосохранение (каждые 30 секунд)
   const autoSaveRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   useEffect(() => {
     if (!isDirty) return;
     autoSaveRef.current = setInterval(() => {
@@ -251,8 +239,7 @@ export default function AnnotationPage() {
       current.filter((_, index) => index !== selectedBoxIndex),
     );
     setSelectedBoxIndex((current) => {
-      if (current === null) return null;
-      if (boxes.length <= 1) return null;
+      if (current === null || boxes.length <= 1) return null;
       return Math.max(0, current - 1);
     });
     setIsDirty(true);
@@ -260,8 +247,7 @@ export default function AnnotationPage() {
 
   const validateBeforeSubmit = (): string | null => {
     if (!assignmentQuery.data) return "Задание не загружено";
-    const frameWidth = assignmentQuery.data.frame.width;
-    const frameHeight = assignmentQuery.data.frame.height;
+    const { width: fw, height: fh } = assignmentQuery.data.frame;
     if (boxes.length === 0) return "Добавьте хотя бы одну рамку.";
     for (const [index, box] of boxes.entries()) {
       if (
@@ -277,8 +263,8 @@ export default function AnnotationPage() {
       if (
         box.x < 0 ||
         box.y < 0 ||
-        box.x + box.width > frameWidth ||
-        box.y + box.height > frameHeight
+        box.x + box.width > fw ||
+        box.y + box.height > fh
       ) {
         return `Рамка #${index + 1}: выходит за границы изображения.`;
       }
@@ -764,7 +750,8 @@ export default function AnnotationPage() {
 
             <section className="mt-4 space-y-2 text-sm">
               <div className="font-medium">
-                {projectQuery.data?.project_title}
+                {projectQuery.data?.title ??
+                  assignmentQuery.data?.project_title}
               </div>
               <div className="text-gray-500 dark:text-gray-400">
                 Задание {assignmentQuery.data?.assignment_id.slice(0, 8)}
@@ -1100,6 +1087,79 @@ export default function AnnotationPage() {
           </section>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// 🧩 Вспомогательные компоненты
+function MiniStat({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950">
+      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-white">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+      <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+function CoordField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
+        {label}
+      </label>
+      <input
+        type="number"
+        className="input-field"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </div>
+  );
+}
+
+function InfoBox({
+  type,
+  children,
+}: {
+  type: "info" | "warning" | "error" | "success";
+  children: React.ReactNode;
+}) {
+  const colors = {
+    info: "border-blue-200 bg-blue-50 text-blue-700",
+    warning: "border-amber-200 bg-amber-50 text-amber-800",
+    error: "border-red-200 bg-red-50 text-red-700",
+    success: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  };
+  return (
+    <div className={`rounded-lg border p-3 text-xs ${colors[type]}`}>
+      {children}
     </div>
   );
 }

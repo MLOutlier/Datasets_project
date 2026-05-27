@@ -19,6 +19,11 @@ from apps.projects.models import Project, ProjectMembership
 from apps.projects.task_registry import (
     TASK_BBOX_ANNOTATION,
     TASK_BBOX_VALIDATION,
+    TASK_CLASSIFICATION,
+    TASK_COMPARISON,
+    TASK_IMAGE_ANNOTATION,
+    TASK_TEXT_ANNOTATION,
+    TASK_TYPE_SPECS,
     TASK_VIDEO_ANNOTATION,
     TASK_VIDEO_INTERVAL_VALIDATION,
 )
@@ -47,6 +52,8 @@ from .preannotation import generate_preannotation_for_frame
 from .security import log_security_event
 from .upload import absolute_media_path, image_dimensions
 from .video_qc import build_video_qc_payload, interpolate_boxes
+#
+from apps.users.notification_utils import notify_task_assigned, notify_task_submitted
 
 DEFAULT_TASK_BATCH_SIZE = 10
 DEFAULT_MIN_SEQUENCE_SIZE = 3
@@ -1133,7 +1140,7 @@ def _workflow_settings(project: Project) -> dict:
     }
 
 
-def _build_asset_batches(asset: ImportAsset, frames: List[FrameItem], project: Project) -> List[dict]:
+def _build_frame_batches(batch_namespace: str, frames: List[FrameItem], project: Project) -> List[dict]:
     settings = _workflow_settings(project)
     task_batch_size = settings["task_batch_size"]
     min_sequence_size = settings["min_sequence_size"]
@@ -1141,7 +1148,7 @@ def _build_asset_batches(asset: ImportAsset, frames: List[FrameItem], project: P
     total_batches = (len(frames) + task_batch_size - 1) // task_batch_size if frames else 0
     for batch_number, start in enumerate(range(0, len(frames), task_batch_size), start=1):
         batch_frames = frames[start : start + task_batch_size]
-        batch_id = f"{asset.id}:batch:{batch_number}"
+        batch_id = f"{batch_namespace}:batch:{batch_number}"
         batch_size = len(batch_frames)
         for index, frame in enumerate(batch_frames, start=1):
             batches.append(
@@ -1159,16 +1166,21 @@ def _build_asset_batches(asset: ImportAsset, frames: List[FrameItem], project: P
                         "sequence_length": batch_size,
                         "min_sequence_size": min_sequence_size,
                         "validation_ready": batch_size >= min_sequence_size,
-                        "asset_id": str(asset.id),
+                        "asset_id": str(frame.asset.id),
                     },
                 }
             )
     return batches
 
 
+def _build_asset_batches(asset: ImportAsset, frames: List[FrameItem], project: Project) -> List[dict]:
+    return _build_frame_batches(str(asset.id), frames, project)
+
+
 def create_work_items_for_import(import_session: ImportSession) -> Dict[str, int]:
     project = import_session.project
     processed_assets = list(ImportAsset.objects(import_session=import_session, processing_status=ImportAsset.STATUS_PROCESSED))
+    
     if not _is_task(project, TASK_BBOX_ANNOTATION):
         preview = build_import_preview(import_session)
         import_session.preview = preview
@@ -1184,89 +1196,134 @@ def create_work_items_for_import(import_session: ImportSession) -> Dict[str, int
         import_session.status = ImportSession.STATUS_FINALIZED if processed_assets else ImportSession.STATUS_FAILED
         import_session.save()
         return import_session.summary
+    
     frame_ids = []
     created_work_items = 0
     created_assignments = 0
-    workflow_batches_total = 0
     validation_ready_items = 0
     queue_position = _next_queue_position(project)
     local_assignment_counts: Dict[str, int] = {}
+    image_frames: List[FrameItem] = []
+    batch_entries: List[dict] = []
+    
     for asset in processed_assets:
-        if asset.asset_type == ImportAsset.TYPE_VIDEO:
-            asset_frames = list(FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at"))
+        asset_frames = list(FrameItem.objects(project=project, asset=asset).order_by("created_at", "frame_number"))
+        if asset.asset_type == ImportAsset.TYPE_IMAGE:
+            image_frames.extend(asset_frames)
         else:
-            asset_frames = list(FrameItem.objects(project=project, asset=asset).order_by("frame_number", "created_at"))
-        batch_entries = _build_asset_batches(asset, asset_frames, project)
-        if batch_entries:
-            workflow_batches_total += max(int(item["workflow_meta"]["task_batch_number"]) for item in batch_entries)
-        for entry in batch_entries:
-            frame = entry["frame"]
-            workflow_meta = entry["workflow_meta"]
-            work_item = WorkItem.objects(project=project, frame=frame).first()
-            if not work_item:
-                work_item = WorkItem(project=project, frame=frame)
-                work_item.workflow_meta = workflow_meta
-                work_item.validation_status = WorkItem.VALIDATION_PENDING
-                ai_enabled = bool((project.participant_rules or {}).get("ai_prelabel_enabled", False))
-                if ai_enabled:
-                    model_name = str((project.participant_rules or {}).get("ai_model") or "baseline-box-v1")
-                    confidence_threshold = float((project.participant_rules or {}).get("ai_confidence_threshold") or 0.7)
-                    preannotation = generate_preannotation_for_frame(frame, model_name=model_name, confidence_threshold=confidence_threshold)
-                    work_item.pre_annotations = preannotation
-                    work_item.pre_annotation_model = model_name
-                    work_item.pre_annotation_confidence_threshold = confidence_threshold
-                    log_security_event(
-                        project=project,
-                        event_type=SecurityEvent.EVENT_PREANNOTATION,
-                        payload={"frame_id": str(frame.id), "model": model_name, "threshold": confidence_threshold, "boxes": len(preannotation.get("boxes", []))},
-                    )
-                work_item.save()
-                created_work_items += 1
-            else:
-                work_item.workflow_meta = workflow_meta
-                work_item.save()
-            if workflow_meta.get("validation_ready"):
-                validation_ready_items += 1
-            existing_annotators = {str(assignment.annotator.id) for assignment in Assignment.objects(work_item=work_item)}
-            required_assignments = max(1, int(project.assignments_per_task or 1))
-            candidate_annotators = select_annotators_for_project(project, max(50, required_assignments * 3), stage="bbox_annotation")
-            selected_annotators = sorted(
-                [user for user in candidate_annotators if str(user.id) not in existing_annotators],
-                key=lambda user: (local_assignment_counts.get(str(user.id), 0), str(user.id)),
-            )[: max(0, required_assignments - len(existing_annotators))]
-            if len(existing_annotators) + len(selected_annotators) < int(project.assignments_per_task or 1):
-                _mark_work_item_validation_blocked(
-                    work_item,
-                    WorkItem.VALIDATION_INSUFFICIENT_ANNOTATORS,
-                    "Not enough independent annotators are available for bbox annotation",
-                    {
-                        "required_assignments": int(project.assignments_per_task or 1),
-                        "available_assignments": len(existing_annotators) + len(selected_annotators),
-                    },
-                )
-            next_order = Assignment.objects(work_item=work_item).count()
-            for annotator in selected_annotators:
-                if str(annotator.id) in existing_annotators:
-                    continue
-                assignment = Assignment(
-                    project=project,
-                    work_item=work_item,
-                    annotator=annotator,
-                    order_index=next_order,
-                    queue_position=queue_position,
-                    status=Assignment.STATUS_ASSIGNED,
-                )
-                assignment.save()
-                created_assignments += 1
-                local_assignment_counts[str(annotator.id)] = local_assignment_counts.get(str(annotator.id), 0) + 1
-                queue_position += 1
+            batch_entries.extend(_build_asset_batches(asset, asset_frames, project))
+    
+    if image_frames:
+        batch_entries.extend(_build_frame_batches(f"{import_session.id}:images", image_frames, project))
+
+    workflow_batches_total = len({entry["workflow_meta"]["task_batch_id"] for entry in batch_entries})
+    
+    for entry in batch_entries:
+        frame = entry["frame"]
+        workflow_meta = entry["workflow_meta"]
+        work_item = WorkItem.objects(project=project, frame=frame).first()
+        
+        if not work_item:
+            work_item = WorkItem(project=project, frame=frame)
+            work_item.workflow_meta = workflow_meta
+            work_item.validation_status = WorkItem.VALIDATION_PENDING
+            ai_enabled = bool((project.participant_rules or {}).get("ai_prelabel_enabled", False))
+            if ai_enabled:
+                model_name = str((project.participant_rules or {}).get("ai_model") or "baseline-box-v1")
+                confidence_threshold = float((project.participant_rules or {}).get("ai_confidence_threshold") or 0.7)
+                preannotation = generate_preannotation_for_frame(frame, model_name=model_name, confidence_threshold=confidence_threshold)
+                work_item.pre_annotations = preannotation
+                work_item.pre_annotation_model = model_name
+                work_item.pre_annotation_confidence_threshold = confidence_threshold
                 log_security_event(
                     project=project,
-                    event_type=SecurityEvent.EVENT_ASSIGNMENT_DISTRIBUTION,
-                    payload={"work_item_id": str(work_item.id), "annotator_id": str(annotator.id)},
+                    event_type=SecurityEvent.EVENT_PREANNOTATION,
+                    payload={"frame_id": str(frame.id), "model": model_name, "threshold": confidence_threshold, "boxes": len(preannotation.get("boxes", []))},
                 )
-                next_order += 1
-            frame_ids.append(str(frame.id))
+            work_item.save()
+            created_work_items += 1
+        else:
+            work_item.workflow_meta = workflow_meta
+            work_item.save()
+            
+        if workflow_meta.get("validation_ready"):
+            validation_ready_items += 1
+            
+        existing_annotator_ids = {str(assignment.annotator.id) for assignment in Assignment.objects(work_item=work_item)}
+        required_assignments = max(1, int(project.assignments_per_task or 1))
+        candidate_annotators = select_annotators_for_project(project, max(50, required_assignments * 3), stage="bbox_annotation")
+        
+        selected_annotators = sorted(
+            [user for user in candidate_annotators if str(user.id) not in existing_annotator_ids],
+            key=lambda user: (local_assignment_counts.get(str(user.id), 0), str(user.id)),
+        )[: max(0, required_assignments - len(existing_annotator_ids))]
+        
+        if len(existing_annotator_ids) + len(selected_annotators) < int(project.assignments_per_task or 1):
+            _mark_work_item_validation_blocked(
+                work_item,
+                WorkItem.VALIDATION_INSUFFICIENT_ANNOTATORS,
+                "Not enough independent annotators are available for bbox annotation",
+                {
+                    "required_assignments": int(project.assignments_per_task or 1),
+                    "available_assignments": len(existing_annotator_ids) + len(selected_annotators),
+                },
+            )
+        
+        next_order = Assignment.objects(work_item=work_item).count()
+        
+        for annotator in selected_annotators:
+            assignment = Assignment(
+                project=project,
+                work_item=work_item,
+                annotator=annotator,
+                order_index=next_order,
+                queue_position=queue_position,
+                status=Assignment.STATUS_ASSIGNED,
+            )
+            assignment.save()
+            created_assignments += 1
+            local_assignment_counts[str(annotator.id)] = local_assignment_counts.get(str(annotator.id), 0) + 1
+            queue_position += 1
+            
+            # ✅ Уведомление о назначении задачи (ПРАВИЛЬНЫЙ ВЫЗОВ)
+            from apps.users.notification_utils import notify_task_assigned
+            notify_task_assigned(
+                user=annotator,
+                assignment_id=str(assignment.id),
+                project_id=str(project.id),
+                project_title=project.title,
+                project_type="bbox"
+            )
+            
+            log_security_event(
+                project=project,
+                event_type=SecurityEvent.EVENT_ASSIGNMENT_DISTRIBUTION,
+                payload={"work_item_id": str(work_item.id), "annotator_id": str(annotator.id)},
+            )
+            next_order += 1
+        
+        frame_ids.append(str(frame.id))
+    
+    preview = build_import_preview(import_session)
+    import_session.preview = preview
+    cleanup_summary = {
+        "duplicates_removed": sum(int((asset.metadata or {}).get("cleanup", {}).get("removed_duplicates", 0)) for asset in processed_assets),
+        "invalid_frames_removed": sum(int((asset.metadata or {}).get("cleanup", {}).get("removed_invalid_frames", 0)) for asset in processed_assets),
+        "duplicate_assets": [str(asset.id) for asset in ImportAsset.objects(import_session=import_session, processing_status=ImportAsset.STATUS_FAILED) if "Duplicate asset" in (asset.error_message or "")],
+    }
+    import_session.summary = {
+        "work_items_created": created_work_items,
+        "assignments_created": created_assignments,
+        "frame_ids": frame_ids,
+        "workflow_batches_total": workflow_batches_total,
+        "validation_ready_items": validation_ready_items,
+        "workflow_settings": _workflow_settings(project),
+        "cleanup": cleanup_summary,
+    }
+    import_session.status = ImportSession.STATUS_FINALIZED if created_work_items or processed_assets else ImportSession.STATUS_FAILED
+    import_session.save()
+    return import_session.summary
+        
 
     preview = build_import_preview(import_session)
     import_session.preview = preview
@@ -1535,14 +1592,14 @@ def _assignment_quality_signals(assignment: Assignment) -> dict:
 
 
 def update_user_quality(user: User, agreement: float, disputed: bool = False) -> None:
-    completed = int(user.completed_assignments or 0) + 1
+    completed = int(getattr(user, "completed_assignments", 0) or 0) + 1
     current_rating = float(user.rating or 0.0)
     user.rating = round(((current_rating * (completed - 1)) + agreement) / completed, 4)
     if disputed:
-        previous_conflicts = float(user.conflict_rate or 0.0) * (completed - 1)
+        previous_conflicts = float(getattr(user, "conflict_rate", 0.0) or 0.0) * (completed - 1)
         user.conflict_rate = round((previous_conflicts + 1.0) / completed, 4)
     else:
-        previous_conflicts = float(user.conflict_rate or 0.0) * (completed - 1)
+        previous_conflicts = float(getattr(user, "conflict_rate", 0.0) or 0.0) * (completed - 1)
         user.conflict_rate = round(previous_conflicts / completed, 4)
     user.completed_assignments = completed
     user.save()
@@ -2477,6 +2534,18 @@ def save_assignment_annotation(assignment: Assignment, label_data: dict, comment
             real_items_per_batch=settings["bbox_real_items_per_batch"],
             golden_items_per_batch=settings["bbox_golden_items_per_batch"],
         )
+
+    # ✅ Уведомление об отправке разметки (ИСПРАВЛЕНО)
+    if is_final:
+        from apps.users.notification_utils import notify_task_submitted
+        notify_task_submitted(
+            annotator=assignment.annotator,
+            reviewer=assignment.project.owner,
+            assignment_id=str(assignment.id),
+            project_id=str(assignment.project.id),
+            project_title=assignment.project.title
+        )
+
     return annotation, evaluation
 
 
@@ -2713,6 +2782,94 @@ def _run_video_qc_for_work_item(work_item: WorkItem) -> None:
         )
 
 
+def _project_readiness_gates(project: Project, overview: dict) -> list[dict]:
+    task_type = _task_type(project)
+    generic = overview.get("generic_tasks") or {}
+    imports = overview.get("imports") or {}
+    work_items = overview.get("work_items") or {}
+    intervals = overview.get("intervals") or {}
+    bbox_validation = overview.get("bbox_validation") or {}
+    source_sync = overview.get("source_sync") or {}
+    export = overview.get("export") or {}
+
+    if task_type in {TASK_TEXT_ANNOTATION, TASK_CLASSIFICATION, TASK_COMPARISON}:
+        return [
+            {"key": "project_created", "label": "Проект создан", "ready": True},
+            {"key": "tasks_created", "label": "Задания добавлены", "ready": int(generic.get("total") or 0) > 0},
+            {"key": "answers_submitted", "label": "Ответы собираются", "ready": int(generic.get("completed") or 0) > 0},
+            {"key": "export_ready", "label": "Экспорт доступен", "ready": int(generic.get("completed") or 0) > 0},
+        ]
+
+    if task_type == TASK_IMAGE_ANNOTATION:
+        return [
+            {"key": "project_created", "label": "Проект создан", "ready": True},
+            {"key": "images_uploaded", "label": "Изображения загружены", "ready": int(imports.get("assets_total") or 0) > 0},
+            {"key": "tasks_created", "label": "Задания созданы", "ready": int(generic.get("total") or 0) > 0},
+            {"key": "labels_submitted", "label": "Метки собираются", "ready": int(generic.get("completed") or 0) > 0},
+            {"key": "export_ready", "label": "Экспорт доступен", "ready": int(generic.get("completed") or 0) > 0},
+        ]
+
+    if task_type == TASK_VIDEO_ANNOTATION:
+        return [
+            {"key": "project_created", "label": "Проект создан", "ready": True},
+            {"key": "video_uploaded", "label": "Видео загружено", "ready": bool(imports.get("video_asset_ids"))},
+            {"key": "interval_chunks_assigned", "label": "Интервальные задания выданы", "ready": int(intervals.get("validation_assigned") or 0) > 0 or int(intervals.get("total") or 0) > 0},
+            {"key": "intervals_submitted", "label": "Интервалы отправлены", "ready": int(intervals.get("total") or 0) > 0},
+            {"key": "export_ready", "label": "Отчёт доступен", "ready": int(intervals.get("total") or 0) > 0},
+        ]
+
+    if task_type == TASK_VIDEO_INTERVAL_VALIDATION:
+        return [
+            {"key": "source_project_selected", "label": "Источник выбран", "ready": bool(source_sync.get("source_project_id"))},
+            {"key": "source_synced", "label": "Интервалы синхронизированы", "ready": source_sync.get("status") == "synced"},
+            {"key": "validators_assigned", "label": "Проверки назначены", "ready": int(intervals.get("validation_assigned") or 0) > 0},
+            {"key": "validation_submitted", "label": "Решения собираются", "ready": int(intervals.get("validation_submitted") or 0) > 0},
+            {"key": "report_ready", "label": "Отчёт доступен", "ready": int(intervals.get("approved") or 0) + int(intervals.get("rejected") or 0) > 0},
+        ]
+
+    if task_type == TASK_BBOX_VALIDATION:
+        return [
+            {"key": "source_project_selected", "label": "Источник выбран", "ready": bool(source_sync.get("source_project_id"))},
+            {"key": "source_synced", "label": "Разметка синхронизирована", "ready": source_sync.get("status") == "synced"},
+            {"key": "validation_batches_assigned", "label": "Пакеты проверки назначены", "ready": int(bbox_validation.get("assigned") or 0) > 0},
+            {"key": "validation_submitted", "label": "Проверки собираются", "ready": int(bbox_validation.get("submitted") or 0) > 0},
+            {"key": "report_ready", "label": "Отчёт доступен", "ready": int(bbox_validation.get("approved_items") or 0) + int(bbox_validation.get("needs_changes_items") or 0) > 0},
+        ]
+
+    return [
+        {"key": "project_created", "label": "Проект создан", "ready": True},
+        {"key": "media_uploaded", "label": "Медиа загружены", "ready": int(imports.get("assets_total") or 0) > 0},
+        {"key": "work_items_created", "label": "Кадры подготовлены", "ready": int(work_items.get("total") or 0) > 0},
+        {"key": "assignments_completed", "label": "Разметка выполняется", "ready": int(work_items.get("completed") or 0) > 0},
+        {"key": "bbox_validated", "label": "Разметка проверена", "ready": int(work_items.get("validation_approved") or 0) > 0},
+        {"key": "export_ready", "label": "Экспорт доступен", "ready": int(export.get("ready_items") or 0) > 0},
+    ]
+
+
+def _project_next_action(project: Project, overview: dict, readiness_gates: list[dict]) -> dict:
+    task_type = _task_type(project)
+    first_blocked = next((gate for gate in readiness_gates if not gate.get("ready")), None)
+    if not first_blocked:
+        return {"key": "export", "label": "Экспортировать датасет", "route": f"/projects/{project.id}", "severity": "success"}
+
+    key = str(first_blocked.get("key") or "")
+    if key in {"tasks_created", "pairs_created"}:
+        return {"key": key, "label": "Добавить задания", "route": f"/projects/{project.id}", "severity": "info"}
+    if key in {"images_uploaded", "media_uploaded", "video_uploaded"}:
+        return {"key": key, "label": "Загрузить данные", "route": f"/projects/{project.id}", "severity": "info"}
+    if key in {"source_project_selected", "source_synced"}:
+        return {"key": key, "label": "Синхронизировать проект-источник", "route": f"/projects/{project.id}", "severity": "warning"}
+    if task_type == TASK_VIDEO_ANNOTATION:
+        return {"key": key, "label": "Открыть интервальную разметку", "route": f"/labeling/intervals?projectId={project.id}&stage=intervals", "severity": "info"}
+    if task_type == TASK_VIDEO_INTERVAL_VALIDATION:
+        return {"key": key, "label": "Открыть проверку интервалов", "route": f"/labeling/intervals?projectId={project.id}&stage=interval-validation", "severity": "info"}
+    if task_type == TASK_BBOX_VALIDATION:
+        return {"key": key, "label": "Открыть bbox-валидацию", "route": f"/labeling/bbox-validation?projectId={project.id}", "severity": "info"}
+    if task_type in {TASK_TEXT_ANNOTATION, TASK_IMAGE_ANNOTATION, TASK_CLASSIFICATION, TASK_COMPARISON}:
+        return {"key": key, "label": "Передать задания исполнителям", "route": f"/labeling/generic/{project.id}", "severity": "info"}
+    return {"key": key, "label": "Продолжить bbox-разметку", "route": f"/labeling/projects/{project.id}", "severity": "info"}
+
+
 def project_overview(project: Project) -> dict:
     imports = list(ImportSession.objects(project=project))
     assets = list(ImportAsset.objects(project=project))
@@ -2730,6 +2887,80 @@ def project_overview(project: Project) -> dict:
             generic_tasks = generic_task_summary(project)
     except Exception:
         generic_tasks = {}
+    raw_annotation_count = (
+        WorkAnnotation.objects(
+            work_item__in=work_items,
+            status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED],
+        ).count()
+        if work_items
+        else 0
+    )
+    consensus_annotation_count = sum(
+        1
+        for item in work_items
+        if item.status == WorkItem.STATUS_COMPLETED and bool(_normalize_boxes(item.final_annotation))
+    )
+    validated_dataset_count = sum(
+        1
+        for item in work_items
+        if item.status == WorkItem.STATUS_COMPLETED and item.validation_status == WorkItem.VALIDATION_APPROVED and bool(_normalize_boxes(item.final_annotation))
+    )
+    validation_report_count = sum(len(item.decisions or {}) for item in bbox_validation_assignments) + sum(
+        1 for item in interval_validation_assignments if item.status == IntervalValidationAssignment.STATUS_SUBMITTED
+    )
+    export_artifacts = [
+        {
+            "artifact": "raw_annotations",
+            "title": "Сырые разметки",
+            "ready": raw_annotation_count > 0,
+            "items_count": raw_annotation_count,
+            "quality_level": "raw",
+            "validated": False,
+            "message": ""
+            if raw_annotation_count > 0
+            else "Сырые разметки появятся после первой отправленной bbox-разметки исполнителя.",
+            "formats": ["json", "jsonl", "csv", "both"],
+        },
+        {
+            "artifact": "consensus_annotations",
+            "title": "Агрегированная разметка",
+            "ready": consensus_annotation_count > 0,
+            "items_count": consensus_annotation_count,
+            "quality_level": "consensus",
+            "validated": False,
+            "message": ""
+            if consensus_annotation_count > 0
+            else "Агрегированная разметка появится после завершения consensus по work item.",
+            "formats": ["json", "jsonl", "csv", "both"],
+        },
+        {
+            "artifact": "validated_dataset",
+            "title": "Проверенный датасет",
+            "ready": validated_dataset_count > 0,
+            "items_count": validated_dataset_count,
+            "quality_level": "validated",
+            "validated": True,
+            "message": ""
+            if validated_dataset_count > 0
+            else "Проверенный датасет доступен только после approved validation.",
+            "formats": ["coco", "yolo", "voc", "csv", "json", "jsonl", "both"],
+        },
+    ]
+    if _is_task(project, TASK_BBOX_VALIDATION, TASK_VIDEO_INTERVAL_VALIDATION) or validation_report_count > 0:
+        export_artifacts.append(
+            {
+                "artifact": "validation_report",
+                "title": "Отчет валидации",
+                "ready": validation_report_count > 0,
+                "items_count": validation_report_count,
+                "quality_level": "validation_report",
+                "validated": False,
+                "message": ""
+                if validation_report_count > 0
+                else "Отчет появится после первых отправленных решений валидаторов.",
+                "formats": ["json", "jsonl", "csv", "both"],
+            }
+        )
     interval_agreements = [
         float((interval.metadata or {}).get("validation_agreement") or 0.0)
         for interval in intervals
@@ -2758,7 +2989,7 @@ def project_overview(project: Project) -> dict:
                 "conflict_rate": getattr(membership.user, "conflict_rate", 0.0),
             }
         )
-    return {
+    overview = {
         "project_id": str(project.id),
         "project": {
             "title": project.title,
@@ -2807,10 +3038,10 @@ def project_overview(project: Project) -> dict:
             "validation_ready_items": sum(1 for item in work_items if item.workflow_meta.get("validation_ready")),
         },
         "export": {
-            "ready_items": sum(1 for item in work_items if item.status == WorkItem.STATUS_COMPLETED and item.validation_status == WorkItem.VALIDATION_APPROVED),
+            "ready_items": validated_dataset_count,
             "blocked_items": sum(1 for item in work_items if not (item.status == WorkItem.STATUS_COMPLETED and item.validation_status == WorkItem.VALIDATION_APPROVED)),
             "readiness_rate": round(
-                sum(1 for item in work_items if item.status == WorkItem.STATUS_COMPLETED and item.validation_status == WorkItem.VALIDATION_APPROVED) / len(work_items),
+                validated_dataset_count / len(work_items),
                 4,
             )
             if work_items
@@ -2826,6 +3057,7 @@ def project_overview(project: Project) -> dict:
                     WorkItem.VALIDATION_INSUFFICIENT_VALIDATORS,
                 }
             ),
+            "artifacts": export_artifacts,
         },
         "intervals": {
             "total": len(intervals),
@@ -2873,6 +3105,11 @@ def project_overview(project: Project) -> dict:
         },
         "annotators": annotator_stats,
     }
+    spec = TASK_TYPE_SPECS.get(_task_type(project))
+    overview["task_contract"] = spec.to_dict() if spec else {}
+    overview["readiness_gates"] = _project_readiness_gates(project, overview)
+    overview["next_action"] = _project_next_action(project, overview, overview["readiness_gates"])
+    return overview
 
 
 def ensure_bbox_annotation_assignments(project: Project, max_items: int | None = None) -> int:
@@ -3274,7 +3511,13 @@ def _export_manifest(export_records: List[dict]) -> List[dict]:
     return manifest_items
 
 
-def _quality_report(project: Project, work_items: List[WorkItem], assignments: List[Assignment], reviews: List[ReviewRecord]) -> dict:
+def _quality_report(
+    project: Project,
+    work_items: List[WorkItem],
+    assignments: List[Assignment],
+    reviews: List[ReviewRecord],
+    artifact: str = "validated_dataset",
+) -> dict:
     completed = [item for item in work_items if item.status == WorkItem.STATUS_COMPLETED]
     pending_review = [item for item in work_items if item.status == WorkItem.STATUS_IN_REVIEW]
     rejected = [item for item in work_items if item.review_required and item.status != WorkItem.STATUS_COMPLETED]
@@ -3302,6 +3545,14 @@ def _quality_report(project: Project, work_items: List[WorkItem], assignments: L
     return {
         "project_id": str(project.id),
         "version": 2,
+        "artifact": artifact,
+        "quality_level": "validated" if artifact == "validated_dataset" else "project_result",
+        "validated": artifact == "validated_dataset",
+        "included": len(exportable_items),
+        "excluded": len(excluded_items),
+        "warning": ""
+        if artifact == "validated_dataset"
+        else "This export is a project result artifact and is not a final validated dataset.",
         "work_items_total": total,
         "work_items_completed": len(completed),
         "work_items_in_review": len(pending_review),
@@ -3345,6 +3596,241 @@ def _quality_report(project: Project, work_items: List[WorkItem], assignments: L
             "state": "active" if GoldenFrame.objects(project=project, status=GoldenFrame.STATUS_ACTIVE).count() else "bootstrap",
         },
     }
+
+
+def _frame_payload(work_item: WorkItem) -> dict:
+    frame = work_item.frame
+    return {
+        "frame_id": str(frame.id),
+        "frame_uri": frame.frame_uri,
+        "source_asset_id": str(frame.asset.id),
+        "frame_number": frame.frame_number,
+        "timestamp_sec": frame.timestamp_sec,
+        "width": frame.width,
+        "height": frame.height,
+    }
+
+
+def _artifact_project_payload(project: Project, export_format: str, artifact: str) -> dict:
+    return {
+        "id": str(project.id),
+        "title": project.title,
+        "annotation_type": project.annotation_type,
+        "task_type": _task_type(project),
+        "widget_type": getattr(project, "widget_type", "") or "",
+        "source_project_id": str(project.source_project.id) if getattr(project, "source_project", None) else None,
+        "source_project_title": project.source_project.title if getattr(project, "source_project", None) else "",
+        "export_format": export_format,
+        "artifact": artifact,
+    }
+
+
+def _raw_annotation_rows(project: Project) -> List[dict]:
+    rows: List[dict] = []
+    work_items = list(WorkItem.objects(project=project))
+    for annotation in WorkAnnotation.objects(work_item__in=work_items, status__in=[WorkAnnotation.STATUS_SUBMITTED, WorkAnnotation.STATUS_ACCEPTED]).order_by("created_at"):
+        work_item = annotation.work_item
+        assignment = annotation.assignment
+        rows.append(
+            {
+                "annotation_id": str(annotation.id),
+                "assignment_id": str(assignment.id) if assignment else "",
+                "work_item_id": str(work_item.id),
+                **_frame_payload(work_item),
+                "annotator_id": str(annotation.annotator.id) if annotation.annotator else "",
+                "annotator_username": getattr(annotation.annotator, "username", "") if annotation.annotator else "",
+                "annotation_status": annotation.status,
+                "assignment_status": assignment.status if assignment else "",
+                "is_final": bool(annotation.is_final),
+                "comment": annotation.comment or "",
+                "label_data": annotation.label_data or {},
+                "boxes": _normalize_boxes(annotation.label_data),
+                "work_item_status": work_item.status,
+                "validation_status": work_item.validation_status,
+                "agreement_score": work_item.agreement_score,
+                "created_at": annotation.created_at.isoformat() if annotation.created_at else "",
+                "updated_at": annotation.updated_at.isoformat() if annotation.updated_at else "",
+            }
+        )
+    return rows
+
+
+def _consensus_annotation_rows(project: Project) -> List[dict]:
+    rows: List[dict] = []
+    for work_item in WorkItem.objects(project=project, status=WorkItem.STATUS_COMPLETED).order_by("created_at"):
+        boxes = _normalize_boxes(work_item.final_annotation)
+        if not boxes:
+            continue
+        rows.append(
+            {
+                "work_item_id": str(work_item.id),
+                **_frame_payload(work_item),
+                "final_source": work_item.final_source,
+                "final_annotation": {"boxes": boxes},
+                "boxes": boxes,
+                "validation_status": work_item.validation_status,
+                "validation_comment": work_item.validation_comment or "",
+                "agreement_score": work_item.agreement_score,
+                "review_status": work_item.review_status,
+                "workflow_meta": work_item.workflow_meta or {},
+                "created_at": work_item.created_at.isoformat() if work_item.created_at else "",
+                "updated_at": work_item.updated_at.isoformat() if work_item.updated_at else "",
+            }
+        )
+    return rows
+
+
+def _validation_report_rows(project: Project) -> List[dict]:
+    rows: List[dict] = []
+    work_item_lookup = {str(item.id): item for item in WorkItem.objects(project=project)}
+    for assignment in BBoxValidationAssignment.objects(project=project).order_by("created_at"):
+        decisions = assignment.decisions or {}
+        if not decisions:
+            rows.append(
+                {
+                    "validation_assignment_id": str(assignment.id),
+                    "validation_type": "bbox",
+                    "validator_id": str(assignment.validator.id) if assignment.validator else "",
+                    "validator_username": getattr(assignment.validator, "username", "") if assignment.validator else "",
+                    "assignment_status": assignment.status,
+                    "decision": "",
+                    "golden_score": assignment.golden_score,
+                    "work_item_id": "",
+                    "source_project_id": str(project.source_project.id) if getattr(project, "source_project", None) else "",
+                    "source_work_item_id": "",
+                    "comment": "",
+                    "created_at": assignment.created_at.isoformat() if assignment.created_at else "",
+                    "updated_at": assignment.updated_at.isoformat() if assignment.updated_at else "",
+                }
+            )
+            continue
+        for work_item_id, decision in decisions.items():
+            work_item = work_item_lookup.get(str(work_item_id))
+            workflow_meta = work_item.workflow_meta if work_item else {}
+            row = {
+                "validation_assignment_id": str(assignment.id),
+                "validation_type": "bbox",
+                "validator_id": str(assignment.validator.id) if assignment.validator else "",
+                "validator_username": getattr(assignment.validator, "username", "") if assignment.validator else "",
+                "assignment_status": assignment.status,
+                "decision": decision,
+                "golden_score": assignment.golden_score,
+                "work_item_id": str(work_item.id) if work_item else str(work_item_id),
+                "source_project_id": workflow_meta.get("source_project_id") or (str(project.source_project.id) if getattr(project, "source_project", None) else ""),
+                "source_work_item_id": workflow_meta.get("source_work_item_id") or "",
+                "source_frame_id": workflow_meta.get("source_frame_id") or "",
+                "work_item_validation_status": work_item.validation_status if work_item else "",
+                "work_item_validation_comment": work_item.validation_comment if work_item else "",
+                "comment": "",
+                "created_at": assignment.created_at.isoformat() if assignment.created_at else "",
+                "updated_at": assignment.updated_at.isoformat() if assignment.updated_at else "",
+            }
+            if work_item:
+                row.update(_frame_payload(work_item))
+            rows.append(row)
+
+    for assignment in IntervalValidationAssignment.objects(project=project).order_by("created_at"):
+        interval = assignment.interval
+        rows.append(
+            {
+                "validation_assignment_id": str(assignment.id),
+                "validation_type": "video_interval",
+                "validator_id": str(assignment.validator.id) if assignment.validator else "",
+                "validator_username": getattr(assignment.validator, "username", "") if assignment.validator else "",
+                "assignment_status": assignment.status,
+                "decision": assignment.decision or "",
+                "comment": assignment.comment or "",
+                "interval_id": str(interval.id),
+                "interval_status": interval.status,
+                "source_project_id": (interval.metadata or {}).get("source_project_id") or (str(project.source_project.id) if getattr(project, "source_project", None) else ""),
+                "source_interval_id": (interval.metadata or {}).get("source_interval_id") or "",
+                "asset_id": str(interval.asset.id),
+                "start_frame": interval.start_frame,
+                "end_frame": interval.end_frame,
+                "start_sec": interval.start_sec,
+                "end_sec": interval.end_sec,
+                "created_at": assignment.created_at.isoformat() if assignment.created_at else "",
+                "updated_at": assignment.updated_at.isoformat() if assignment.updated_at else "",
+            }
+        )
+    return rows
+
+
+def _tabular_artifact_payload(project: Project, artifact: str, rows: List[dict], export_format: str, quality_level: str, validated: bool, warning: str) -> dict:
+    payload = {
+        "export_version": 1,
+        "generated_at": datetime.utcnow().isoformat(),
+        "project": _artifact_project_payload(project, export_format, artifact),
+        "quality_report": {
+            "project_id": str(project.id),
+            "artifact": artifact,
+            "quality_level": quality_level,
+            "validated": validated,
+            "included": len(rows),
+            "excluded": 0,
+            "ready": len(rows) > 0,
+            "warning": warning,
+            "message": "" if rows else "No items are available for this project result artifact yet.",
+        },
+    }
+    if export_format in {"json", "both"}:
+        payload["json"] = rows
+    if export_format in {"jsonl", "both"}:
+        payload["jsonl"] = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    if export_format in {"csv", "both"}:
+        payload["csv"] = rows
+    return payload
+
+
+def build_project_artifact_export(project: Project, artifact: str, export_format: str = "both") -> dict:
+    if artifact == "raw_annotations":
+        return _tabular_artifact_payload(
+            project,
+            artifact,
+            _raw_annotation_rows(project),
+            export_format,
+            quality_level="raw",
+            validated=False,
+            warning="This export contains individual submitted annotations and is not a final validated dataset.",
+        )
+    if artifact == "consensus_annotations":
+        return _tabular_artifact_payload(
+            project,
+            artifact,
+            _consensus_annotation_rows(project),
+            export_format,
+            quality_level="consensus",
+            validated=False,
+            warning="This export contains aggregated project annotations; validation approval is not required for inclusion.",
+        )
+    if artifact == "validation_report":
+        return _tabular_artifact_payload(
+            project,
+            artifact,
+            _validation_report_rows(project),
+            export_format,
+            quality_level="validation_report",
+            validated=False,
+            warning="This export is a validation process report, not a final training dataset.",
+        )
+    return build_dataset_export(project, export_format=export_format)
+
+
+def build_project_artifact_export_archive(project: Project, artifact: str, export_format: str = "both") -> tuple[str, bytes]:
+    payload = build_project_artifact_export(project, artifact=artifact, export_format=export_format)
+    archive_stream = io.BytesIO()
+    with zipfile.ZipFile(archive_stream, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("export_manifest.json", json.dumps({k: payload[k] for k in ("export_version", "generated_at", "project")}, ensure_ascii=False, indent=2))
+        bundle.writestr("quality_report.json", json.dumps(payload.get("quality_report", {}), ensure_ascii=False, indent=2))
+        if "json" in payload:
+            bundle.writestr(f"{artifact}.json", json.dumps(payload.get("json", []), ensure_ascii=False, indent=2))
+        if "jsonl" in payload:
+            bundle.writestr(f"{artifact}.jsonl", payload.get("jsonl", ""))
+        if "csv" in payload:
+            bundle.writestr(f"{artifact}.csv", _csv_rows_to_text(payload.get("csv", [])))
+        if not any(key in payload for key in ("json", "jsonl", "csv")):
+            bundle.writestr("README_NO_EXPORTABLE_ITEMS.txt", "No items are available for this project result artifact yet.\n")
+    return f"project_{project.id}_{artifact}_{export_format}.zip", archive_stream.getvalue()
 
 
 def _coco_categories(project: Project) -> tuple[list[dict], dict[str, int]]:
@@ -3552,8 +4038,9 @@ def build_dataset_export(project: Project, export_format: str = "both") -> dict:
             "title": project.title,
             "annotation_type": project.annotation_type,
             "export_format": export_format,
+            "artifact": "validated_dataset",
         },
-        "quality_report": _quality_report(project, work_items, assignments, reviews),
+        "quality_report": _quality_report(project, work_items, assignments, reviews, artifact="validated_dataset"),
         "manifest": _export_manifest(export_records),
     }
     if export_format in {"coco", "both"}:
