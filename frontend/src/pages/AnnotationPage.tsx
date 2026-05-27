@@ -356,8 +356,18 @@ export default function AnnotationPage() {
             title="Информация и настройки (I)"
             aria-label="Информация и настройки"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
             </svg>
           </button>
           <button
@@ -369,8 +379,18 @@ export default function AnnotationPage() {
             title="Разметка (D)"
             aria-label="Разметка"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V7m-9-3h10a2 2 0 012 2v10a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2z" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M17 3a2.828 2.828 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"
+              />
             </svg>
           </button>
           <button
@@ -382,8 +402,18 @@ export default function AnnotationPage() {
             title="Перемещение (P)"
             aria-label="Перемещение"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7l3-3m0 0l3 3m-3-3H8m0 0v4m4-4H8m0 0v12c0 1.1.9 2 2 2h10a2 2 0 002-2V9a2 2 0 00-2-2z" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M3 12h18m-4-4 4 4-4 4M7 8l-4 4 4 4M12 3v18m-4-4 4 4 4-4M8 7l4-4 4 4"
+              />
             </svg>
           </button>
           <button
@@ -395,8 +425,18 @@ export default function AnnotationPage() {
             title="Отменить (Ctrl+Z)"
             aria-label="Отменить"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h9l-3 3-3-3H7a4 4 0 004 4v1m-1-4h6a2 2 0 012 2v2a2 2 0 01-2 2H7a2 2 0 01-2-2v-2a2 2 0 012-2z" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M9 7 5 11l4 4M5 11h10a4 4 0 0 1 0 8h-2"
+              />
             </svg>
           </button>
           <button
@@ -405,10 +445,22 @@ export default function AnnotationPage() {
             onClick={() =>
               window.dispatchEvent(new CustomEvent("annotation:redo"))
             }
-            title="Повторить (Ctrl+Shift+Z)"
-            aria-label="Повторить"
+            title="Вернуть изменение (Ctrl+Shift+Z)"
+            aria-label="Вернуть изменение"
           >
-            ↷
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="m15 7 4 4-4 4M19 11H9a4 4 0 0 0 0 8h2"
+              />
+            </svg>
           </button>
           <button
             type="button"
@@ -419,8 +471,18 @@ export default function AnnotationPage() {
             title="Уменьшить масштаб"
             aria-label="Уменьшить масштаб"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M20 12H4"
+              />
             </svg>
           </button>
           <button
@@ -432,8 +494,18 @@ export default function AnnotationPage() {
             title="Увеличить масштаб"
             aria-label="Увеличить масштаб"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 4v16m8-8H4"
+              />
             </svg>
           </button>
           <button
@@ -445,8 +517,26 @@ export default function AnnotationPage() {
             title="Центрировать изображение"
             aria-label="Центрировать изображение"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3M6 16l6-6m0 0l6 6m-6-6v4" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <circle
+                cx="12"
+                cy="12"
+                r="8"
+                stroke="currentColor"
+                strokeWidth="2"
+                fill="none"
+              />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 4v5m0 6v5M4 12h5m6 0h5"
+              />
             </svg>
           </button>
           <button
@@ -457,10 +547,21 @@ export default function AnnotationPage() {
             title="Удалить рамку (Delete)"
             aria-label="Удалить рамку"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+              />
             </svg>
           </button>
+          <div className="w-0.5 h-5 bg-gray-200 dark:bg-gray-700 mx-2" />
           <button
             type="button"
             className="flex h-9 w-9 items-center justify-center rounded-md text-gray-700 transition hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800"
@@ -468,13 +569,23 @@ export default function AnnotationPage() {
             title="Комментарий (C)"
             aria-label="Комментарий"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+              />
             </svg>
           </button>
           <button
             type="button"
-            className="flex h-9 w-100 items-center justify-center rounded-md text-gray-700 transition hover:bg-gray-100 bg-blue-500 text-white dark:text-gray-200 dark:hover:bg-blue-600"
+            className="flex h-9 items-center justify-center rounded-md bg-blue-500 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-white dark:bg-blue-600 dark:hover:bg-blue-500 dark:focus:ring-offset-gray-900"
             onClick={() => setIsInstructionOpen(true)}
             title="Инструкция"
             aria-label="Инструкция"
@@ -489,8 +600,18 @@ export default function AnnotationPage() {
             title="Сохранить черновик (Ctrl+S)"
             aria-label="Сохранить черновик"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10l4 4 4-4m0 0l-4-4m4 4V3" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M5 3h12l2 2v16H5V3zM8 3v6h8V3M8 21v-7h8v7"
+              />
             </svg>
           </button>
           <button
@@ -501,8 +622,18 @@ export default function AnnotationPage() {
             title="Отправить и далее (Enter)"
             aria-label="Отправить и далее"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M5 13l4 4L19 7"
+              />
             </svg>
           </button>
         </div>
@@ -611,8 +742,14 @@ export default function AnnotationPage() {
       ) : null}
 
       {isInstructionOpen ? (
-        <div className="fixed inset-0 z-50 bg-black/30" onClick={() => setIsInstructionOpen(false)}>
-          <aside className="ml-auto flex h-full w-full max-w-md flex-col overflow-y-auto border-l border-gray-200 bg-white p-4 shadow-2xl dark:border-gray-800 dark:bg-gray-950" onClick={(event) => event.stopPropagation()}>
+        <div
+          className="fixed inset-0 z-50 bg-black/30"
+          onClick={() => setIsInstructionOpen(false)}
+        >
+          <aside
+            className="ml-auto flex h-full w-full max-w-md flex-col overflow-y-auto border-l border-gray-200 bg-white p-4 shadow-2xl dark:border-gray-800 dark:bg-gray-950"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold">Инструкция по разметке</h2>
               <button
@@ -642,7 +779,8 @@ export default function AnnotationPage() {
                 </span>
               </div>
               <div className="mt-2 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
-                {projectQuery.data?.instructions || "Инструкция для проекта пока не добавлена."}
+                {projectQuery.data?.instructions ||
+                  "Инструкция для проекта пока не добавлена."}
               </div>
             </section>
           </aside>
