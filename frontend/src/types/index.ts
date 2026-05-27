@@ -166,7 +166,7 @@ export interface TaskUpdateRequest extends Partial<TaskCreateRequest> {
   status?: TaskStatus;
 }
 
-export type ProjectStatus = "open" | "active" | "closed";
+export type ProjectStatus = "open" | "active" | "paused" | "closed";
 export type ProjectType = "standard" | "cv";
 export type AnnotationType = "generic" | "bbox";
 export type ProjectTaskType =
@@ -204,6 +204,7 @@ export interface TaskTypeSpec {
   materializer?: string;
   quality_strategy?: string;
   readiness_gates?: string[];
+  source_task_types?: ProjectTaskType[];
   result_schema?: Record<string, unknown>;
   ui_hints: Record<string, unknown>;
   widget_config?: {
@@ -221,6 +222,24 @@ export interface TaskRegistryResponse {
   default_widget_type: ProjectWidgetType;
   task_types: TaskTypeSpec[];
   widgets: Array<{ value: ProjectWidgetType; title: string }>;
+}
+
+export interface ProjectSourceOption {
+  id: string;
+  title: string;
+  task_type: ProjectTaskType | string;
+  status: string;
+  ready: boolean;
+  ready_count: number;
+  details: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProjectSourceOptionsResponse {
+  items: ProjectSourceOption[];
+  task_type: ProjectTaskType | string;
+  source_task_types: string[];
 }
 
 export interface ProjectLabel {
@@ -285,12 +304,20 @@ export interface GoldenCandidate {
   height: number;
   candidate_score: number;
   candidate_source: string;
+  case_type?: "positive" | "negative" | string;
+  usage?: "control" | "instruction_example" | "both" | string;
+  expected_decision?: "approve" | "needs_changes" | string;
+  issue_type?: string;
+  asset_id?: string;
+  diversity_bucket?: string;
+  auto_candidate_reason?: string;
   status?: "candidate" | "active" | "retired" | string;
   is_active: boolean;
   is_candidate: boolean;
   promoted_at?: string | null;
   review_notes?: string;
   reference_annotation: Record<string, unknown>;
+  probe_annotation?: Record<string, unknown>;
   stats?: {
     annotation_seen: number;
     annotation_passed: number;
@@ -307,6 +334,52 @@ export interface GoldenCandidatesResponse extends ApiListResponse<GoldenCandidat
   active_count: number;
   candidate_count: number;
   retired_count?: number;
+}
+
+export interface GoldenSourceFrame {
+  frame_id: string;
+  frame_url: string;
+  frame_number: number;
+  timestamp_sec: number;
+  width: number;
+  height: number;
+  asset_id?: string;
+  golden_frame_id?: string;
+  golden_status: "none" | "candidate" | "active" | "retired" | string;
+  case_type?: string;
+  issue_type?: string;
+  reference_annotation?: Record<string, unknown>;
+  candidate_score?: number;
+}
+
+export interface InstructionAsset {
+  id: string;
+  asset_type: "instruction" | "link" | "embedded" | "good_example" | "bad_example" | "annotated_example" | string;
+  title: string;
+  body: string;
+  url: string;
+  file_uri: string;
+  file_name: string;
+  mime_type: string;
+  file_size: number;
+  label_data: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_by_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface InstructionBundle {
+  project_id: string;
+  instructions: string;
+  instructions_version: number;
+  instructions_updated_at?: string | null;
+  assets: InstructionAsset[];
+  acknowledgement: {
+    acknowledged: boolean;
+    instructions_version?: number | null;
+    acknowledged_at?: string | null;
+  };
 }
 
 export interface Project {
@@ -327,6 +400,7 @@ export interface Project {
   instructions_file_name?: string;
   instructions_version?: number;
   instructions_updated_at?: string | null;
+  instructions_bundle?: InstructionBundle;
   label_schema: ProjectLabel[];
   participant_rules: ProjectParticipantRules;
   allowed_annotator_ids: string[];
@@ -527,12 +601,22 @@ export interface IntervalValidationQueueItem {
   project_title: string;
   asset_id: string;
   asset_uri: string;
+  media_uri?: string;
+  media_kind?: "clip" | "source" | "none" | string;
+  media_ready?: boolean;
+  media_reason?: string;
   clip?: {
     clip_uri?: string;
     uri?: string;
     start_sec?: number;
     duration_sec?: number;
+    ready?: boolean;
+    reason?: string;
   };
+  clip_ready?: boolean;
+  clip_reason?: string;
+  source_project_id?: string;
+  source_interval_id?: string;
   start_frame: number;
   end_frame: number;
   start_sec: number;
@@ -604,6 +688,7 @@ export interface AnnotatorProjectDetail {
   instructions_file_name?: string;
   instructions_version?: number;
   instructions_updated_at?: string | null;
+  instructions_bundle?: InstructionBundle;
   label_schema: ProjectLabel[];
   frame_interval_sec: number;
   participant_rules: ProjectParticipantRules;
@@ -666,6 +751,7 @@ export interface AssignmentDetail {
   status: string;
   queue_position?: number;
   instructions: string;
+  instructions_bundle?: InstructionBundle;
   label_schema: ProjectLabel[];
   workflow_meta?: AssignmentWorkflowMeta;
   task_batch?: {

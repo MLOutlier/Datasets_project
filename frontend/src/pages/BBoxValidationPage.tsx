@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type WheelEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { annotatorAPI } from "../services/api";
+import { InstructionGate, InstructionPanel } from "../components/InstructionPanel";
 
 type Decision = "approve" | "needs_changes";
 
@@ -78,6 +79,11 @@ export default function BBoxValidationPage() {
     queryKey: ["bbox-validation-queue"],
     queryFn: () => annotatorAPI.bboxValidationQueue(),
   });
+  const projectQuery = useQuery({
+    queryKey: ["annotator-project-detail", projectIdFilter],
+    queryFn: () => annotatorAPI.projectDetail(projectIdFilter),
+    enabled: !!projectIdFilter,
+  });
 
   const assignments = useMemo(
     () => (queueQuery.data?.items ?? []).filter((item: any) => !projectIdFilter || item.project_id === projectIdFilter),
@@ -103,6 +109,8 @@ export default function BBoxValidationPage() {
   const currentQuestion = orderedQuestions[currentIndex] ?? null;
   const backToProject = projectIdFilter ? `/labeling/projects/${projectIdFilter}` : "/labeling";
   const allAnswered = orderedQuestions.length > 0 && orderedQuestions.every((question: any) => Boolean(decisions[question.question_id]));
+  const instructionBundle = projectQuery.data?.instructions_bundle;
+  const instructionsAcknowledged = instructionBundle?.acknowledgement?.acknowledged ?? !projectIdFilter;
 
   useEffect(() => {
     if (!statusNotice) return;
@@ -123,6 +131,7 @@ export default function BBoxValidationPage() {
   const submitMutation = useMutation({
     mutationFn: async () => {
       if (!selectedAssignment) throw new Error("Validation assignment not selected");
+      if (!instructionsAcknowledged) throw new Error("Перед отправкой подтвердите чтение инструкции.");
       const realQuestions = orderedQuestions.filter((question: any) => !question.golden_id);
       const goldenQuestions = orderedQuestions.filter((question: any) => question.golden_id);
       const body = {
@@ -183,6 +192,9 @@ export default function BBoxValidationPage() {
             <h1 className="truncate text-xl font-semibold text-gray-900 dark:text-white">Валидация объектов</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {projectIdFilter ? (
+              <InstructionPanel projectId={projectIdFilter} bundle={instructionBundle} fallbackText={projectQuery.data?.instructions} compact />
+            ) : null}
             <button className="btn-secondary" type="button" onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))} disabled={!orderedQuestions.length || currentIndex <= 0}>
               Назад
             </button>
@@ -220,6 +232,12 @@ export default function BBoxValidationPage() {
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
         Эта страница работает с очередью уже размеченных work items. Загрузка изображений сюда не нужна, сначала должен появиться source-проект и синхронизированная очередь.
       </div>
+
+      {projectIdFilter ? (
+        <>
+          <InstructionGate projectId={projectIdFilter} bundle={instructionBundle} fallbackText={projectQuery.data?.instructions} />
+        </>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(220px,320px),minmax(0,1fr)]">
         <aside className="space-y-2 xl:max-h-[calc(100vh-12rem)] xl:overflow-auto">
@@ -285,7 +303,7 @@ export default function BBoxValidationPage() {
               <div className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
                 <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600 dark:text-gray-400">
                   <span>Отмечено: {Object.keys(decisions).length}/{orderedQuestions.length}</span>
-                  <button className="btn-primary" onClick={() => submitMutation.mutate()} disabled={submitMutation.isPending || !allAnswered}>
+                  <button className="btn-primary" onClick={() => submitMutation.mutate()} disabled={submitMutation.isPending || !allAnswered || !instructionsAcknowledged}>
                     {submitMutation.isPending ? "Отправка..." : "Отправить валидацию"}
                   </button>
                 </div>

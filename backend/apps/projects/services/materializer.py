@@ -190,6 +190,20 @@ class ProjectTaskMaterializer:
                 summary=summary,
             )
 
+        if self.task_type == TASK_BBOX_ANNOTATION:
+            from apps.cv_annotation.services.workflow import materialize_bbox_annotation_interval_source, source_sync_summary
+
+            created = materialize_bbox_annotation_interval_source(self.project)
+            summary = source_sync_summary(self.project)
+            return MaterializationResult(
+                task_type=self.task_type,
+                action="source_intervals_to_bbox_frames",
+                created=created,
+                skipped=int(summary.get("skipped") or 0),
+                errors=tuple(summary.get("errors") or ()),
+                summary=summary,
+            )
+
         return MaterializationResult(task_type=self.task_type, action="source_unsupported")
 
     def sync(self) -> dict[str, Any]:

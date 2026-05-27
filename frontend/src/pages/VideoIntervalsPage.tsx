@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { annotatorAPI } from "../services/api";
 import { VideoJsPlayer } from "../components/VideoJsPlayer";
 import type { IntervalQueueItem, IntervalValidationQueueItem } from "../types";
+import { InstructionGate, InstructionPanel } from "../components/InstructionPanel";
 
 type IntervalDraft = {
   start_frame: number;
@@ -40,6 +41,22 @@ function frameDuration(item?: { start_frame?: number; end_frame?: number; durati
   return Math.max(0, end - start);
 }
 
+function validationMediaMessage(reason: string, kind?: string) {
+  const normalized = String(reason || "").toLowerCase();
+  if (kind === "source" && normalized) {
+    return "Клип интервала не готов, открыт исходный ролик. Проверьте интервал по отмеченным границам.";
+  }
+  if (normalized.includes("ffmpeg")) {
+    return "Клип интервала не собран: ffmpeg недоступен или завершился с ошибкой. Используется исходное видео, если оно доступно.";
+  }
+  if (normalized.includes("source_missing")) {
+    return "Исходное видео не найдено на сервере. Проверьте файлы проекта-источника.";
+  }
+  if (normalized.includes("format")) {
+    return "Формат видео не поддерживается браузером. Нужен MP4/H.264 или готовый review clip.";
+  }
+  return reason || "Медиа для проверки интервала недоступно.";
+}
 function readDraft(key: string): DraftSnapshot | null {
   try {
     const raw = localStorage.getItem(key);
@@ -162,6 +179,11 @@ export default function VideoIntervalsPage() {
     queryKey: ["interval-validation-queue"],
     queryFn: () => annotatorAPI.intervalValidationQueue(),
   });
+  const projectQuery = useQuery({
+    queryKey: ["annotator-project-detail", projectIdFilter],
+    queryFn: () => annotatorAPI.projectDetail(projectIdFilter),
+    enabled: !!projectIdFilter,
+  });
 
   const chunkItems = useMemo(
     () => ((chunkQueueQuery.data?.items ?? []) as IntervalQueueItem[]).filter((item) => !projectIdFilter || item.project_id === projectIdFilter),
@@ -188,11 +210,21 @@ export default function VideoIntervalsPage() {
   const activeStartFrame = Number(activeItem?.start_frame || 0);
   const activeEndFrame = Number(activeItem?.end_frame || activeStartFrame);
   const activeDurationSec = frameDuration(activeItem);
-  const validationClipStartSec = isValidationMode && selectedValidation?.clip?.clip_uri ? Number(selectedValidation.clip.start_sec || 0) : 0;
+  const activeStartSec = Number((activeItem as any)?.start_sec || frameToTime(activeStartFrame, activeFrameInterval));
+  const activeEndSec = Number((activeItem as any)?.end_sec || frameToTime(activeEndFrame, activeFrameInterval));
+  const validationMediaKind = String(selectedValidation?.media_kind || "");
+  const validationMediaReady = Boolean(selectedValidation?.media_ready ?? selectedValidation?.clip_ready ?? selectedValidation?.asset_uri);
+  const validationClipReady =
+    validationMediaKind === "clip" || Boolean((selectedValidation?.clip_ready ?? false) && (selectedValidation?.clip?.clip_uri || selectedValidation?.clip?.uri));
+  const validationMediaReason = String(selectedValidation?.media_reason || selectedValidation?.clip_reason || selectedValidation?.clip?.reason || "");
+  const validationClipStartSec = isValidationMode && validationClipReady ? Number(selectedValidation?.clip?.start_sec || 0) : 0;
+  const instructionBundle = projectQuery.data?.instructions_bundle;
+  const instructionsAcknowledged = instructionBundle?.acknowledgement?.acknowledged ?? !projectIdFilter;
 
   const mediaSrc = isValidationMode
-    ? selectedValidation?.clip?.clip_uri || selectedValidation?.clip?.uri || selectedValidation?.asset_uri || ""
+    ? selectedValidation?.media_uri || selectedValidation?.clip?.clip_uri || selectedValidation?.clip?.uri || selectedValidation?.asset_uri || ""
     : selectedChunk?.asset_uri || "";
+  const mediaInitialTime = isValidationMode && !validationClipReady ? activeStartSec : 0;
 
   const currentFrame = useMemo(() => {
     if (!activeItem) return activeStartFrame;
@@ -202,6 +234,9 @@ export default function VideoIntervalsPage() {
 
   const totalTimeLabel = formatSeconds(activeDurationSec);
   const defaultLabel = selectedChunk?.label_schema?.[0]?.name || "interval";
+  const validationTimelineIntervals = selectedValidation
+    ? [{ start_frame: activeStartFrame, end_frame: activeEndFrame, confidence: 1, label: "interval" }]
+    : [];
 
   const commitIntervals = (next: IntervalDraft[]) => {
     setHistory((prev) => [...prev, intervalsRef.current]);
@@ -237,7 +272,7 @@ export default function VideoIntervalsPage() {
     const player = playerRef.current;
     if (!player || !activeItem) return;
     const absoluteTime = frameToTime(frame, activeFrameInterval);
-    const nextTime = isValidationMode && selectedValidation?.clip?.clip_uri ? Math.max(0, absoluteTime - validationClipStartSec) : absoluteTime;
+    const nextTime = isValidationMode && validationClipReady ? Math.max(0, absoluteTime - validationClipStartSec) : absoluteTime;
     player.currentTime?.(nextTime);
   };
 
@@ -402,6 +437,9 @@ export default function VideoIntervalsPage() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
+      if (!instructionsAcknowledged) {
+        throw new Error("Перед отправкой подтвердите чтение инструкции.");
+      }
       if (!selectedChunk || intervalsRef.current.length === 0) {
         throw new Error("Выберите чанк и добавьте хотя бы один интервал");
       }
@@ -439,6 +477,9 @@ export default function VideoIntervalsPage() {
       if (!selectedValidation) {
         throw new Error("Выберите интервал для проверки");
       }
+      if (!instructionsAcknowledged) {
+        throw new Error("Перед отправкой подтвердите чтение инструкции.");
+      }
       return annotatorAPI.submitIntervalValidation(selectedValidation.assignment_id, {
         decision,
         comment,
@@ -471,7 +512,7 @@ export default function VideoIntervalsPage() {
   });
 
   const renderChunkControls = () => (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr),320px]">
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,2fr),340px]">
       <div className="space-y-4">
         <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -536,7 +577,7 @@ export default function VideoIntervalsPage() {
               <div className="text-sm font-medium text-gray-900 dark:text-white">Интервалы</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">Черновик сохраняется автоматически в браузере.</div>
             </div>
-            <button className="btn-primary" type="button" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || intervals.length === 0}>
+            <button className="btn-primary" type="button" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || intervals.length === 0 || !instructionsAcknowledged}>
               {saveMutation.isPending ? "Отправка..." : "Отправить интервалы"}
             </button>
           </div>
@@ -616,30 +657,49 @@ export default function VideoIntervalsPage() {
               startFrame={activeStartFrame}
               endFrame={activeEndFrame}
               currentFrame={currentFrame}
-              intervals={[]}
+              intervals={validationTimelineIntervals}
               draftStartFrame={null}
               onSeekFrame={seekFrame}
             />
           </div>
           <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            Отрывок интервала с небольшим контекстом. Границы clip: {selectedValidation?.clip?.start_sec?.toFixed?.(1) ?? validationClipStartSec.toFixed(1)}-
-            {(Number(selectedValidation?.clip?.start_sec || 0) + Number(selectedValidation?.clip?.duration_sec || 0)).toFixed(1)} с.
+            {validationClipReady ? (
+              <>
+                Отрывок интервала с небольшим контекстом. Границы clip: {selectedValidation?.clip?.start_sec?.toFixed?.(1) ?? validationClipStartSec.toFixed(1)}-
+                {(Number(selectedValidation?.clip?.start_sec || 0) + Number(selectedValidation?.clip?.duration_sec || 0)).toFixed(1)} с.
+              </>
+            ) : (
+              <>Открыт исходный ролик. Проверьте интервал по границам {activeStartSec.toFixed(1)}-{activeEndSec.toFixed(1)} с.</>
+            )}
           </div>
         </div>
 
-        <VideoJsPlayer
-          key={selectedValidation?.assignment_id || "validation-empty"}
-          src={mediaSrc}
-          initialTime={0}
-          onReady={(player) => {
-            playerRef.current = player;
-          }}
-          onStateChange={setPlayerState}
-          onError={(message) => {
-            setStatusNotice({ kind: "error", text: message });
-          }}
-        />
-      </div>
+        {!validationMediaReady || (validationMediaKind === "source" && validationMediaReason) ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+            <div className="font-medium">{validationMediaReady ? "Используется исходное видео" : "Медиа для валидации недоступно"}</div>
+            <div className="mt-1 text-xs">{validationMediaMessage(validationMediaReason, validationMediaKind)}</div>
+          </div>
+        ) : null}
+
+        {mediaSrc && validationMediaReady ? (
+          <VideoJsPlayer
+            key={`${selectedValidation?.assignment_id || "validation-empty"}:${mediaSrc}`}
+            src={mediaSrc}
+            className="w-full"
+            initialTime={mediaInitialTime}
+            onReady={(player) => {
+              playerRef.current = player;
+            }}
+            onStateChange={setPlayerState}
+            onError={(message) => {
+              setStatusNotice({ kind: "error", text: validationMediaMessage(message || validationMediaReason, validationMediaKind) });
+            }}
+          />
+        ) : (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-100">
+            {validationMediaMessage(validationMediaReason, validationMediaKind)}
+          </div>
+        )}</div>
 
       <div className="space-y-4">
         <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
@@ -651,10 +711,10 @@ export default function VideoIntervalsPage() {
             onChange={(event) => setComment(event.target.value)}
           />
           <div className="mt-3 flex flex-wrap gap-2">
-            <button className="btn-primary" type="button" onClick={() => validationMutation.mutate("approved")} disabled={validationMutation.isPending}>
+            <button className="btn-primary" type="button" onClick={() => validationMutation.mutate("approved")} disabled={validationMutation.isPending || !instructionsAcknowledged}>
               Подтвердить
             </button>
-            <button className="btn-secondary" type="button" onClick={() => validationMutation.mutate("rejected")} disabled={validationMutation.isPending}>
+            <button className="btn-secondary" type="button" onClick={() => validationMutation.mutate("rejected")} disabled={validationMutation.isPending || !instructionsAcknowledged}>
               Отклонить
             </button>
           </div>
@@ -672,6 +732,9 @@ export default function VideoIntervalsPage() {
             <h1 className="truncate text-xl font-semibold text-gray-900 dark:text-white">{pageTitle}</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {projectIdFilter ? (
+              <InstructionPanel projectId={projectIdFilter} bundle={instructionBundle} fallbackText={projectQuery.data?.instructions} compact />
+            ) : null}
             <Link className={!isValidationMode ? "btn-primary" : "btn-secondary"} to={`/labeling/intervals${projectIdFilter ? `?projectId=${projectIdFilter}&stage=intervals` : ""}`}>
               Разметка
             </Link>
@@ -700,6 +763,12 @@ export default function VideoIntervalsPage() {
       <div className={`rounded-xl border p-3 text-sm ${isValidationMode ? "border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100" : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100"}`}>
         {stageNotice}
       </div>
+
+      {projectIdFilter ? (
+        <>
+          <InstructionGate projectId={projectIdFilter} bundle={instructionBundle} fallbackText={projectQuery.data?.instructions} />
+        </>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(220px,320px),minmax(0,1fr)]">
         <aside className="space-y-2 xl:max-h-[calc(100vh-12rem)] xl:overflow-auto">

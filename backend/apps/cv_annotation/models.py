@@ -414,13 +414,25 @@ class GoldenFrame(Document):
     STATUS_CANDIDATE = "candidate"
     STATUS_ACTIVE = "active"
     STATUS_RETIRED = "retired"
+    CASE_POSITIVE = "positive"
+    CASE_NEGATIVE = "negative"
+    USAGE_CONTROL = "control"
+    USAGE_INSTRUCTION = "instruction_example"
+    USAGE_BOTH = "both"
 
     project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
     frame = ReferenceField(FrameItem, required=True, reverse_delete_rule=CASCADE)
     reference_annotation = DictField(required=True, default=dict)
+    probe_annotation = DictField(default=dict)
     source_work_item = ReferenceField("WorkItem", null=True, reverse_delete_rule=CASCADE)
     candidate_score = FloatField(default=0.0)
     candidate_source = StringField(default="")
+    case_type = StringField(default=CASE_POSITIVE, choices=[CASE_POSITIVE, CASE_NEGATIVE])
+    usage = StringField(default=USAGE_CONTROL, choices=[USAGE_CONTROL, USAGE_INSTRUCTION, USAGE_BOTH])
+    expected_decision = StringField(default="approve")
+    issue_type = StringField(default="")
+    diversity_bucket = StringField(default="")
+    auto_candidate_reason = StringField(default="")
     status = StringField(
         required=True,
         default=STATUS_ACTIVE,
@@ -442,10 +454,18 @@ class GoldenFrame(Document):
 
     meta = {
         "collection": "cv_golden_frames",
-        "indexes": ["project", "status", "is_active"],
+        "indexes": ["project", "status", "is_active", "case_type", "diversity_bucket"],
     }
 
     def save(self, *args, **kwargs):
+        if not self.case_type:
+            self.case_type = self.CASE_POSITIVE
+        if not self.expected_decision:
+            self.expected_decision = "needs_changes" if self.case_type == self.CASE_NEGATIVE else "approve"
+        if not self.diversity_bucket and self.frame:
+            asset_id = str(self.frame.asset.id) if getattr(self.frame, "asset", None) else "frame"
+            bucket_index = int(float(getattr(self.frame, "timestamp_sec", 0.0) or 0.0) // 30)
+            self.diversity_bucket = f"{asset_id}:{bucket_index}"
         if self.status == self.STATUS_ACTIVE:
             self.is_active = True
             self.is_candidate = True

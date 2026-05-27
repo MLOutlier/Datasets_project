@@ -28,7 +28,7 @@ django.setup()
 
 from apps.users.models import User
 from apps.datasets_core.models import Dataset
-from apps.projects.models import Project, Task
+from apps.projects.models import InstructionAcknowledgement, Project, ProjectInstructionAsset, Task
 from apps.labeling.models import Annotation, LabelingSession
 from apps.quality.models import QualityMetric, QualityReview
 from apps.finance.models import Transaction, PaymentRequest
@@ -40,6 +40,11 @@ from apps.cv_annotation.models import (
     ImportSession,
     ImportAsset,
     FrameItem,
+    IntervalValidationAssignment,
+    VideoChunkAnnotation,
+    VideoChunkAssignment,
+    VideoChunkTask,
+    VideoInterval,
     WorkItem,
     Assignment,
     WorkAnnotation,
@@ -114,12 +119,18 @@ def _cleanup_database():
     """Очищает все коллекции тестовой базы данных."""
     collections = [
         User, Dataset, Project, Task,
+        ProjectInstructionAsset, InstructionAcknowledgement,
         Annotation, LabelingSession,
         QualityMetric, QualityReview,
         Transaction, PaymentRequest,
         ImportSession,
         ImportAsset,
         FrameItem,
+        VideoInterval,
+        VideoChunkTask,
+        VideoChunkAssignment,
+        VideoChunkAnnotation,
+        IntervalValidationAssignment,
         WorkItem,
         Assignment,
         WorkAnnotation,

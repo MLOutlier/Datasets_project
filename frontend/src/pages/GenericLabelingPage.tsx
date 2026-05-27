@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { annotatorAPI, projectsAPI, tasksAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { WidgetRenderer, isWidgetPayloadComplete, type WidgetPayload } from "../components/widgets/WidgetRenderer";
+import { InstructionGate, InstructionPanel } from "../components/InstructionPanel";
 
 function taskTitle(taskType?: string) {
   switch (taskType) {
@@ -45,6 +46,7 @@ export default function GenericLabelingPage() {
   const taskMetadata = (currentTask?.metadata ?? {}) as Record<string, unknown>;
   const prompt = String(taskMetadata.prompt || currentTask?.title || "");
   const payloadComplete = isWidgetPayloadComplete(widgetType, taskType, payload);
+  const instructionsAcknowledged = project?.instructions_bundle?.acknowledgement?.acknowledged ?? true;
 
   const submitMutation = useMutation({
     mutationFn: async () => {
@@ -88,17 +90,15 @@ export default function GenericLabelingPage() {
           <h1 className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{taskTitle(String(project.task_type))}</h1>
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{project.project_title}</p>
         </div>
-        <Link to="/labeling" className="btn-secondary">
+        <div className="flex flex-wrap gap-2">
+          <InstructionPanel projectId={project.project_id} bundle={project.instructions_bundle} fallbackText={project.instructions} compact />
+          <Link to="/labeling" className="btn-secondary">
           К проектам
-        </Link>
-      </div>
-
-      <div className="card space-y-4">
-        <div>
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Инструкция</h2>
-          <div className="mt-2 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">{project.instructions || "Инструкция пока не добавлена."}</div>
+          </Link>
         </div>
       </div>
+
+      <InstructionGate projectId={project.project_id} bundle={project.instructions_bundle} fallbackText={project.instructions} />
 
       {!currentTask ? (
         <div className="card p-10 text-center">
@@ -111,7 +111,7 @@ export default function GenericLabelingPage() {
         <form
           onSubmit={(event: FormEvent) => {
             event.preventDefault();
-            if (payloadComplete) submitMutation.mutate();
+            if (payloadComplete && instructionsAcknowledged) submitMutation.mutate();
           }}
           className="card space-y-4"
         >
@@ -131,7 +131,7 @@ export default function GenericLabelingPage() {
           {error ? <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div> : null}
 
           <div className="flex justify-end">
-            <button type="submit" className="btn-primary" disabled={submitMutation.isPending || !payloadComplete}>
+            <button type="submit" className="btn-primary" disabled={submitMutation.isPending || !payloadComplete || !instructionsAcknowledged}>
               {submitMutation.isPending ? "Отправляем..." : "Отправить"}
             </button>
           </div>

@@ -8,12 +8,15 @@ from rest_framework import serializers
 from ..datasets_core.models import Dataset
 from ..users.models import User
 from .models import Project, ProjectMembership, Task
+from .services.instructions import instruction_bundle
 from .task_registry import (
     TASK_TYPE_CHOICES,
     WIDGET_TYPE_CHOICES,
     annotation_type_for_task,
     default_widget_for_task,
+    is_source_task_allowed,
     is_widget_allowed,
+    source_task_types_for_task,
     task_requires_source_project,
 )
 
@@ -186,10 +189,9 @@ class ProjectSerializer(serializers.Serializer):
             if user and user.role != User.ROLE_ADMIN and str(source_project.owner.id) != str(user.id):
                 raise serializers.ValidationError({"source_project_id": "Source project is not available."})
             source_task_type = getattr(source_project, "task_type", "bbox_annotation") or "bbox_annotation"
-            if task_type == "video_interval_validation" and source_task_type != "video_annotation":
-                raise serializers.ValidationError({"source_project_id": "Interval validation requires a video annotation source project."})
-            if task_type == "bbox_validation" and source_task_type != "bbox_annotation":
-                raise serializers.ValidationError({"source_project_id": "BBox validation requires a bbox annotation source project."})
+            if not is_source_task_allowed(task_type, source_task_type):
+                allowed = ", ".join(source_task_types_for_task(task_type)) or "none"
+                raise serializers.ValidationError({"source_project_id": f"Source project type '{source_task_type}' is not compatible with '{task_type}'. Allowed: {allowed}."})
         if task_requires_source_project(task_type) and not source_project:
             raise serializers.ValidationError({"source_project_id": "This task type requires a source project."})
         attrs["_source_project"] = source_project
@@ -278,8 +280,11 @@ class ProjectSerializer(serializers.Serializer):
                         role=role,
                         specialization=user.specialization,
                         group_name=user.group_name,
+                        groups=user.groups or ([user.group_name] if user.group_name else []),
                     )
                 membership.is_active = True
+                if not getattr(membership, "groups", None):
+                    membership.groups = user.groups or ([user.group_name] if user.group_name else [])
                 membership.save()
                 active_pairs.add((str(user.id), role))
 
@@ -318,6 +323,7 @@ class ProjectSerializer(serializers.Serializer):
             "instructions_file_name": getattr(instance, "instructions_file_name", "") or "",
             "instructions_version": int(getattr(instance, "instructions_version", 0) or 0),
             "instructions_updated_at": getattr(instance, "instructions_updated_at", None),
+            "instructions_bundle": instruction_bundle(instance, self.context.get("request").user if self.context.get("request") else None),
             "label_schema": instance.label_schema or [],
             "participant_rules": instance.participant_rules or {},
             "allowed_annotator_ids": [str(user.id) for user in instance.allowed_annotators or []],

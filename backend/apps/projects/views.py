@@ -7,7 +7,7 @@ import json
 import secrets
 
 from bson import ObjectId
-from django.http import HttpRequest
+from django.http import HttpRequest, HttpResponse
 from mongoengine import Q
 from rest_framework import permissions, status
 from rest_framework.decorators import action
@@ -20,8 +20,9 @@ from ..labeling.models import Annotation, LabelingSession
 from ..labeling.serializers import AnnotationSerializer
 from ..users.models import User
 from ..users.views import authenticate_from_jwt
-from .models import Project, ProjectMembership, Task
+from .models import Project, ProjectInstructionAsset, ProjectMembership, Task
 from .serializers import ProjectSerializer, TaskSerializer
+from .services.instructions import acknowledge_instructions, instruction_asset_payload, instruction_bundle, touch_instruction_version
 from .services.generic_tasks import (
     build_generic_project_export,
     build_generic_project_export_archive,
@@ -30,10 +31,10 @@ from .services.generic_tasks import (
     is_generic_task_project,
     validate_generic_submission,
 )
-from .services.instructions_upload import InstructionUploadError, save_project_instruction
+from .services.instructions_upload import InstructionUploadError, save_project_instruction, save_project_instruction_asset
 from .services.materializer import ProjectTaskMaterializer
 from .export_utils import export_project_dataset
-from .task_registry import task_type_registry_payload
+from .task_registry import is_source_task_allowed, source_task_types_for_task, task_type_registry_payload
 
 PAGE_SIZE = 20
 
@@ -98,6 +99,40 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
             return
         ProjectTaskMaterializer(project).sync()
 
+    def _project_for_instruction_owner(self, user: User, pk: str):
+        if not ObjectId.is_valid(pk):
+            return None
+        if user.role == User.ROLE_ADMIN:
+            return Project.objects(id=ObjectId(pk)).first()
+        return Project.objects(id=ObjectId(pk), owner=user).first()
+
+    def _source_option_payload(self, project: Project, task_type: str) -> dict:
+        from apps.cv_annotation.models import VideoInterval, WorkItem
+
+        source_task_type = getattr(project, "task_type", "bbox_annotation") or "bbox_annotation"
+        details = {}
+        ready_count = 0
+        if task_type == "video_interval_validation":
+            ready_count = VideoInterval.objects(project=project, status__in=[VideoInterval.STATUS_DRAFT, VideoInterval.STATUS_APPROVED]).count()
+            details = {"intervals": ready_count}
+        elif task_type == "bbox_annotation":
+            ready_count = VideoInterval.objects(project=project, status=VideoInterval.STATUS_APPROVED).count()
+            details = {"approved_intervals": ready_count}
+        elif task_type == "bbox_validation":
+            ready_count = WorkItem.objects(project=project, status=WorkItem.STATUS_COMPLETED).count()
+            details = {"completed_work_items": ready_count}
+        return {
+            "id": str(project.id),
+            "title": project.title,
+            "task_type": source_task_type,
+            "status": project.status,
+            "ready": ready_count > 0,
+            "ready_count": int(ready_count or 0),
+            "details": details,
+            "created_at": project.created_at,
+            "updated_at": project.updated_at,
+        }
+
     def get_queryset_for_user(self, user: User):
         if user.role in (User.ROLE_ADMIN,):
             return Project.objects.order_by("-created_at")
@@ -106,7 +141,7 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         accessible_ids = list(
             ProjectMembership.objects(user=user, is_active=True).scalar("project")
         )
-        return Project.objects(id__in=accessible_ids).order_by("-created_at")
+        return Project.objects(id__in=accessible_ids, status__ne=Project.STATUS_PAUSED).order_by("-created_at")
 
     def _paginate(self, qs, request):
         try:
@@ -127,6 +162,18 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         if resp:
             return resp
         qs = self.get_queryset_for_user(user)
+        search = str(request.query_params.get("search") or "").strip()
+        status_filter = str(request.query_params.get("status") or "").strip()
+        task_type_filter = str(request.query_params.get("task_type") or "").strip()
+        annotation_type_filter = str(request.query_params.get("annotation_type") or "").strip()
+        if search:
+            qs = qs.filter(Q(title__icontains=search) | Q(description__icontains=search))
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if task_type_filter:
+            qs = qs.filter(task_type=task_type_filter)
+        if annotation_type_filter:
+            qs = qs.filter(annotation_type=annotation_type_filter)
         items, meta = self._paginate(qs, request)
         serializer = ProjectSerializer(items, many=True, context={"request": request})
         return Response({"items": serializer.data, **meta}, status=status.HTTP_200_OK)
@@ -137,6 +184,32 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         if resp:
             return resp
         return Response(task_type_registry_payload(), status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="source-options")
+    def source_options(self, request, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        task_type = str(request.query_params.get("task_type") or "")
+        allowed_source_types = source_task_types_for_task(task_type)
+        if not allowed_source_types:
+            return Response({"items": [], "task_type": task_type, "source_task_types": []}, status=status.HTTP_200_OK)
+        qs = Project.objects.order_by("-created_at") if user.role == User.ROLE_ADMIN else Project.objects(owner=user).order_by("-created_at")
+        projects = [
+            project
+            for project in qs
+            if is_source_task_allowed(task_type, getattr(project, "task_type", "bbox_annotation") or "bbox_annotation")
+        ]
+        items = [self._source_option_payload(project, task_type) for project in projects]
+        ready_items = [item for item in items if item.get("ready")]
+        return Response(
+            {
+                "items": ready_items,
+                "task_type": task_type,
+                "source_task_types": list(allowed_source_types),
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def create(self, request, *args, **kwargs) -> Response:
         user, resp = self._require_user(request)
@@ -223,6 +296,34 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         project.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=["post"], url_path="pause")
+    def pause(self, request, pk: str = None, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        if not ObjectId.is_valid(pk):
+            return Response({"detail": "Invalid project id"}, status=status.HTTP_400_BAD_REQUEST)
+        project = Project.objects(id=ObjectId(pk)).first()
+        if not project or (user.role != User.ROLE_ADMIN and str(project.owner.id) != str(user.id)):
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        project.status = Project.STATUS_PAUSED
+        project.save()
+        return Response(ProjectSerializer(project, context={"request": request}).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="resume")
+    def resume(self, request, pk: str = None, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        if not ObjectId.is_valid(pk):
+            return Response({"detail": "Invalid project id"}, status=status.HTTP_400_BAD_REQUEST)
+        project = Project.objects(id=ObjectId(pk)).first()
+        if not project or (user.role != User.ROLE_ADMIN and str(project.owner.id) != str(user.id)):
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        project.status = Project.STATUS_ACTIVE
+        project.save()
+        return Response(ProjectSerializer(project, context={"request": request}).data, status=status.HTTP_200_OK)
+
     @action(
         detail=True,
         methods=["get"],
@@ -268,6 +369,16 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         project.instructions_version = int(project.instructions_version or 0) + 1
         project.instructions_updated_at = datetime.utcnow()
         project.save()
+        ProjectInstructionAsset(
+            project=project,
+            created_by=user,
+            asset_type=ProjectInstructionAsset.TYPE_INSTRUCTION,
+            title=payload["file_name"],
+            file_uri=payload["file_uri"],
+            file_name=payload["file_name"],
+            mime_type=payload.get("mime_type", ""),
+            file_size=int(payload.get("file_size") or 0),
+        ).save()
 
         return Response(
             {
@@ -279,6 +390,118 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @action(detail=True, methods=["get", "patch"], url_path="instructions")
+    def instructions(self, request, pk: str = None, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        if not ObjectId.is_valid(pk):
+            return Response({"detail": "Invalid project id"}, status=status.HTTP_400_BAD_REQUEST)
+        project = self.get_queryset_for_user(user).filter(id=ObjectId(pk)).first()
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        if request.method.lower() == "patch":
+            if user.role not in (User.ROLE_CUSTOMER, User.ROLE_ADMIN) or (user.role != User.ROLE_ADMIN and str(project.owner.id) != str(user.id)):
+                return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+            project.instructions = str(request.data.get("instructions") or "")
+            touch_instruction_version(project)
+        return Response(instruction_bundle(project, user), status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="instructions/assets")
+    def instructions_assets(self, request, pk: str = None, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        project = self._project_for_instruction_owner(user, pk)
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        asset_type = str(request.data.get("asset_type") or ProjectInstructionAsset.TYPE_INSTRUCTION)
+        if asset_type not in {
+            ProjectInstructionAsset.TYPE_INSTRUCTION,
+            ProjectInstructionAsset.TYPE_LINK,
+            ProjectInstructionAsset.TYPE_EMBEDDED,
+        }:
+            return Response({"detail": "Unsupported instruction asset type"}, status=status.HTTP_400_BAD_REQUEST)
+        payload = {
+            "file_uri": "",
+            "file_name": "",
+            "mime_type": "",
+            "file_size": "0",
+        }
+        if "file" in request.FILES:
+            try:
+                payload, _path = save_project_instruction_asset(request.FILES["file"], str(project.id))
+            except InstructionUploadError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            asset_type = ProjectInstructionAsset.TYPE_INSTRUCTION
+        asset = ProjectInstructionAsset(
+            project=project,
+            created_by=user,
+            asset_type=asset_type,
+            title=str(request.data.get("title") or payload.get("file_name") or ""),
+            body=str(request.data.get("body") or ""),
+            url=str(request.data.get("url") or ""),
+            file_uri=payload["file_uri"],
+            file_name=payload["file_name"],
+            mime_type=payload["mime_type"],
+            file_size=int(payload["file_size"] or 0),
+        )
+        asset.save()
+        touch_instruction_version(project)
+        return Response({"asset": instruction_asset_payload(asset), "bundle": instruction_bundle(project, user)}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="instructions/examples")
+    def instructions_examples(self, request, pk: str = None, *args, **kwargs) -> Response:
+        user, resp = self._require_user(request)
+        if resp:
+            return resp
+        project = self._project_for_instruction_owner(user, pk)
+        if not project:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        example_type = str(request.data.get("example_type") or "good").lower()
+        asset_type = {
+            "good": ProjectInstructionAsset.TYPE_GOOD_EXAMPLE,
+            "bad": ProjectInstructionAsset.TYPE_BAD_EXAMPLE,
+            "annotated": ProjectInstructionAsset.TYPE_ANNOTATED_EXAMPLE,
+        }.get(example_type)
+        if not asset_type:
+            return Response({"detail": "example_type must be good, bad, or annotated"}, status=status.HTTP_400_BAD_REQUEST)
+        payload = {
+            "file_uri": "",
+            "file_name": "",
+            "mime_type": "",
+            "file_size": "0",
+        }
+        if "file" in request.FILES:
+            try:
+                payload, _path = save_project_instruction_asset(request.FILES["file"], str(project.id), folder="instruction-examples")
+            except InstructionUploadError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        label_data = request.data.get("label_data") or {}
+        if isinstance(label_data, str):
+            try:
+                label_data = json.loads(label_data) if label_data.strip() else {}
+            except json.JSONDecodeError:
+                return Response({"detail": "label_data must be a valid JSON object"}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(label_data, dict):
+            return Response({"detail": "label_data must be an object"}, status=status.HTTP_400_BAD_REQUEST)
+        asset = ProjectInstructionAsset(
+            project=project,
+            created_by=user,
+            asset_type=asset_type,
+            title=str(request.data.get("title") or payload.get("file_name") or ""),
+            body=str(request.data.get("body") or ""),
+            url=str(request.data.get("url") or ""),
+            file_uri=payload["file_uri"],
+            file_name=payload["file_name"],
+            mime_type=payload["mime_type"],
+            file_size=int(payload["file_size"] or 0),
+            label_data=label_data,
+        )
+        asset.save()
+        touch_instruction_version(project)
+        return Response({"asset": instruction_asset_payload(asset), "bundle": instruction_bundle(project, user)}, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=["get"], url_path="tasks/next")
     def tasks_next(self, request, pk: str = None, *args, **kwargs) -> Response:
         user, resp = self._require_user(request)
@@ -289,6 +512,8 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         project = self.get_queryset_for_user(user).filter(id=ObjectId(pk)).first()
         if not project:
             return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role == User.ROLE_ANNOTATOR and project.status == Project.STATUS_PAUSED:
+            return Response({"detail": "Project is paused", "code": "project_paused"}, status=status.HTTP_423_LOCKED)
         if user.role == User.ROLE_ANNOTATOR:
             task = Task.objects(project=project, annotator=user, status=Task.STATUS_IN_PROGRESS).order_by("-difficulty_score", "created_at").first()
             if not task:
@@ -384,41 +609,108 @@ class ProjectViewSet(JWTRequiredMixin, ViewSet):
         except Exception:
             return Response({"detail": "CSV must be utf-8 encoded"}, status=status.HTTP_400_BAD_REQUEST)
         reader = csv.DictReader(io.StringIO(text))
-        required_fields = {"email", "username", "role"}
+        required_fields = {"email"}
         if not required_fields.issubset(set(reader.fieldnames or [])):
-            return Response({"detail": "CSV must include email, username, role"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "CSV must include email"}, status=status.HTTP_400_BAD_REQUEST)
         created = 0
         linked = 0
         skipped = 0
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=["email", "username", "password", "status"])
+        writer.writeheader()
+
+        def _split_groups(value: str) -> list[str]:
+            return [item.strip() for item in str(value or "").replace(";", ",").split(",") if item.strip()]
+
+        def _username_from_email(email_value: str) -> str:
+            base = (email_value.split("@", 1)[0] or "annotator").strip().lower()
+            base = "".join(ch for ch in base if ch.isalnum() or ch in "._-") or "annotator"
+            candidate = base
+            index = 1
+            while User.objects(username=candidate).first():
+                candidate = f"{base}{index}"
+                index += 1
+            return candidate
+
+        def _username_from_name(name_value: str) -> str:
+            base = str(name_value or "").strip().lower().replace(" ", ".")
+            base = "".join(ch for ch in base if ch.isalnum() or ch in "._-") or "annotator"
+            candidate = base
+            index = 1
+            while User.objects(username=candidate).first():
+                candidate = f"{base}{index}"
+                index += 1
+            return candidate
+
+        def _unique_username(raw_username: str, email_value: str) -> str:
+            base = raw_username or _username_from_email(email_value)
+            if not User.objects(username=base).first():
+                return base
+            return _username_from_email(email_value)
+
         for row in reader:
             email = (row.get("email") or "").strip().lower()
             username = (row.get("username") or "").strip()
-            role = (row.get("role") or "").strip().lower()
+            if not username and (row.get("name") or "").strip():
+                username = _username_from_name(row.get("name") or "")
+            if not username:
+                username = _username_from_email(email)
+            else:
+                username = _unique_username(username, email)
+            role = (row.get("role") or User.ROLE_ANNOTATOR).strip().lower()
             group_name = (row.get("group") or row.get("group_name") or "").strip()
+            groups = _split_groups(row.get("groups") or group_name)
+            if group_name and group_name not in groups:
+                groups.insert(0, group_name)
             specialization = (row.get("specialization") or "").strip()
-            if role not in (User.ROLE_ANNOTATOR, User.ROLE_REVIEWER) or not email or not username:
+            if role not in (User.ROLE_ANNOTATOR, User.ROLE_REVIEWER) or not email:
                 skipped += 1
                 continue
             participant = User.objects(email=email).first()
+            password = ""
+            row_status = "linked_existing"
             if not participant:
-                participant = User(email=email, username=username, role=role, group_name=group_name, specialization=specialization)
-                participant.set_password(secrets.token_urlsafe(12))
+                password = secrets.token_urlsafe(12)
+                participant = User(email=email, username=username, role=role, group_name=group_name, groups=groups, specialization=specialization)
+                participant.set_password(password)
                 participant.save()
                 created += 1
+                row_status = "created"
+            else:
+                current_groups = list(getattr(participant, "groups", []) or [])
+                merged_groups = list(dict.fromkeys([*current_groups, *groups]))
+                if merged_groups != current_groups:
+                    participant.groups = merged_groups
+                if group_name and not participant.group_name:
+                    participant.group_name = group_name
+                if specialization and not participant.specialization:
+                    participant.specialization = specialization
+                participant.save()
             membership_role = ProjectMembership.ROLE_ANNOTATOR if role == User.ROLE_ANNOTATOR else ProjectMembership.ROLE_REVIEWER
             membership = ProjectMembership.objects(project=project, user=participant, role=membership_role).first()
             if not membership:
                 membership = ProjectMembership(project=project, user=participant, role=membership_role)
                 linked += 1
             membership.group_name = group_name or membership.group_name
+            current_membership_groups = list(getattr(membership, "groups", []) or [])
+            membership.groups = list(dict.fromkeys([*current_membership_groups, *groups]))
             membership.specialization = specialization or membership.specialization
             membership.is_active = True
             membership.save()
             if membership_role == ProjectMembership.ROLE_ANNOTATOR and all(str(item.id) != str(participant.id) for item in (project.allowed_annotators or [])):
                 project.allowed_annotators = [*(project.allowed_annotators or []), participant]
                 project.save()
+            if membership_role == ProjectMembership.ROLE_REVIEWER and all(str(item.id) != str(participant.id) for item in (project.allowed_reviewers or [])):
+                project.allowed_reviewers = [*(project.allowed_reviewers or []), participant]
+                project.save()
+            writer.writerow({"email": participant.email, "username": participant.username, "password": password, "status": row_status})
         self._sync_cv_workflow(project)
-        return Response({"created_users": created, "linked_memberships": linked, "skipped_rows": skipped}, status=status.HTTP_200_OK)
+        response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="project_{project.id}_participant_credentials.csv"'
+        response["X-Created-Users"] = str(created)
+        response["X-Linked-Memberships"] = str(linked)
+        response["X-Skipped-Rows"] = str(skipped)
+        return response
 
     @action(detail=True, methods=["post"], url_path="assignments/manual-distribute")
     def assignments_manual_distribute(self, request, pk: str = None, *args, **kwargs) -> Response:

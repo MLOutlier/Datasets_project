@@ -5,6 +5,7 @@ import AnnotationCanvas from "../components/AnnotationCanvas";
 import { annotatorAPI, projectsAPI } from "../services/api";
 import { BoundingBox } from "../types";
 import { LoadingSpinner } from "../components/LoadingSpinner";
+import { InstructionGate, InstructionPanel } from "../components/InstructionPanel";
 
 function clampNumber(raw: string, min: number, max: number, fallback: number): number {
   const parsed = Number(raw);
@@ -51,6 +52,8 @@ export default function AnnotationPage() {
   }, [assignmentQuery.data]);
 
   const labels = useMemo(() => assignmentQuery.data?.label_schema ?? [], [assignmentQuery.data]);
+  const instructionBundle = assignmentQuery.data?.instructions_bundle ?? projectQuery.data?.instructions_bundle;
+  const instructionsAcknowledged = instructionBundle?.acknowledgement?.acknowledged ?? true;
   const allowedLabels = useMemo(() => new Set(labels.map((label) => label.name)), [labels]);
   const selectedBox = selectedBoxIndex !== null ? boxes[selectedBoxIndex] ?? null : null;
 
@@ -155,6 +158,7 @@ export default function AnnotationPage() {
 
   const validateBeforeSubmit = (): string | null => {
     if (!assignmentQuery.data) return "Задание не загружено";
+    if (!instructionsAcknowledged) return "Перед отправкой подтвердите чтение инструкции.";
     const frameWidth = assignmentQuery.data.frame.width;
     const frameHeight = assignmentQuery.data.frame.height;
     if (boxes.length === 0) return "Добавьте хотя бы одну рамку.";
@@ -211,8 +215,13 @@ export default function AnnotationPage() {
             <span className="inline-block mt-2 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded">Несохранённые изменения</span>
           )}
         </div>
-        <Link to="/labeling" className="btn-secondary">К проектам</Link>
+        <div className="flex flex-wrap gap-2">
+          <InstructionPanel projectId={assignmentQuery.data.project_id} bundle={instructionBundle} fallbackText={assignmentQuery.data.instructions} compact />
+          <Link to="/labeling" className="btn-secondary">К проектам</Link>
+        </div>
       </div>
+
+      <InstructionGate projectId={assignmentQuery.data.project_id} bundle={instructionBundle} fallbackText={assignmentQuery.data.instructions} />
 
       <div className="grid grid-cols-1 gap-6 2xl:grid-cols-[minmax(0,1.45fr),minmax(360px,0.8fr)]">
         <section className="space-y-4">
@@ -366,28 +375,6 @@ export default function AnnotationPage() {
             )}
           </section>
 
-          {/* Instructions */}
-          <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Инструкция</h2>
-            <div className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-sm text-gray-600 dark:text-gray-400">
-              {assignmentQuery.data.instructions || "Инструкция для проекта пока не добавлена."}
-            </div>
-            {projectQuery.data?.instructions_file_uri ? (
-              <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
-                <div>
-                  Файл инструкции:{" "}
-                  <a className="text-blue-600 hover:underline dark:text-blue-400" href={projectQuery.data.instructions_file_uri} target="_blank" rel="noreferrer">
-                    {projectQuery.data.instructions_file_name || "инструкция"}
-                  </a>
-                </div>
-                <div className="mt-1 text-gray-500 dark:text-gray-400">
-                  v{projectQuery.data.instructions_version ?? 0}
-                  {projectQuery.data.instructions_updated_at ? ` | ${new Date(projectQuery.data.instructions_updated_at).toLocaleString()}` : ""}
-                </div>
-              </div>
-            ) : null}
-          </section>
-
           {/* Submit */}
           <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Комментарий и отправка</h2>
@@ -407,10 +394,10 @@ export default function AnnotationPage() {
               ) : null}
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <button type="button" className="btn-secondary" onClick={() => submit(false)} disabled={submitMutation.isPending}>
+              <button type="button" className="btn-secondary" onClick={() => submit(false)} disabled={submitMutation.isPending || !instructionsAcknowledged}>
                 💾 Сохранить черновик <span className="text-xs opacity-50 ml-1">Ctrl+S</span>
               </button>
-              <button type="button" className="btn-primary" onClick={() => submit(true)} disabled={submitMutation.isPending || boxes.length === 0}>
+              <button type="button" className="btn-primary" onClick={() => submit(true)} disabled={submitMutation.isPending || boxes.length === 0 || !instructionsAcknowledged}>
                 ✅ Отправить и далее <span className="text-xs opacity-50 ml-1">Enter</span>
               </button>
             </div>

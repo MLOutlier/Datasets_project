@@ -39,6 +39,7 @@ class TaskTypeSpec:
     materializer: str = "media_import"
     quality_strategy: str = "consensus"
     readiness_gates: tuple[str, ...] = ()
+    source_task_types: tuple[str, ...] = ()
     result_schema: dict | None = None
     ui_hints: dict | None = None
 
@@ -60,6 +61,7 @@ class TaskTypeSpec:
             "materializer": self.materializer,
             "quality_strategy": self.quality_strategy,
             "readiness_gates": list(self.readiness_gates),
+            "source_task_types": list(self.source_task_types),
             "result_schema": result_schema,
             "ui_hints": self.ui_hints or {},
             "widget_config": {
@@ -109,6 +111,7 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
         materializer="source_intervals_to_validation",
         quality_strategy="majority_quorum",
         readiness_gates=("source_project_selected", "source_synced", "validators_assigned", "validation_submitted", "report_ready"),
+        source_task_types=(TASK_VIDEO_ANNOTATION,),
         result_schema={"type": "interval_validation", "fields": ["decision", "comment"]},
         ui_hints={"needs_labels": False, "source_task_type": TASK_VIDEO_ANNOTATION},
     ),
@@ -119,13 +122,14 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
         default_widget=WIDGET_BBOX,
         widgets=(WIDGET_BBOX,),
         annotation_type="bbox",
-        input_modes=("image_upload", "video_frames"),
+        input_modes=("image_upload", "video_frames", "source_project"),
         export_formats=("coco", "yolo", "voc", "csv", "both"),
         executor_route="/labeling/projects/{project_id}",
         data_source="media_upload",
         materializer="media_import_to_work_items",
         quality_strategy="bbox_iou_consensus_golden",
         readiness_gates=("project_created", "media_uploaded", "work_items_created", "assignments_completed", "bbox_validated", "export_ready"),
+        source_task_types=(TASK_VIDEO_INTERVAL_VALIDATION,),
         result_schema={"type": "bbox", "fields": ["boxes"], "box_fields": ["x", "y", "width", "height", "label"]},
         ui_hints={"needs_labels": True, "media_upload": True},
     ),
@@ -144,6 +148,7 @@ TASK_TYPE_SPECS: dict[str, TaskTypeSpec] = {
         materializer="source_bbox_to_validation_batches",
         quality_strategy="bbox_validation_golden",
         readiness_gates=("source_project_selected", "source_synced", "validation_batches_assigned", "validation_submitted", "report_ready"),
+        source_task_types=(TASK_BBOX_ANNOTATION,),
         result_schema={"type": "bbox_validation", "fields": ["decision", "comment"]},
         ui_hints={"needs_labels": True, "source_task_type": TASK_BBOX_ANNOTATION},
     ),
@@ -244,6 +249,14 @@ def task_requires_source_project(task_type: str) -> bool:
     return TASK_TYPE_SPECS.get(task_type, TASK_TYPE_SPECS[TASK_BBOX_ANNOTATION]).requires_source_project
 
 
+def source_task_types_for_task(task_type: str) -> tuple[str, ...]:
+    return TASK_TYPE_SPECS.get(task_type, TASK_TYPE_SPECS[TASK_BBOX_ANNOTATION]).source_task_types
+
+
+def is_source_task_allowed(task_type: str, source_task_type: str) -> bool:
+    return source_task_type in source_task_types_for_task(task_type)
+
+
 def is_widget_allowed(task_type: str, widget_type: str) -> bool:
     spec = TASK_TYPE_SPECS.get(task_type)
     return bool(spec and widget_type in spec.widgets)
@@ -252,7 +265,7 @@ def is_widget_allowed(task_type: str, widget_type: str) -> bool:
 def task_type_registry_payload() -> dict:
     widgets = sorted({widget for spec in TASK_TYPE_SPECS.values() for widget in spec.widgets})
     return {
-        "version": 1,
+        "version": 2,
         "default_task_type": TASK_BBOX_ANNOTATION,
         "default_widget_type": WIDGET_BBOX,
         "task_types": [spec.to_dict() for spec in TASK_TYPE_SPECS.values()],

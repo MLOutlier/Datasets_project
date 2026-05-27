@@ -410,11 +410,39 @@ def participants_view(request):
         return Response({'detail': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
 
     role = request.query_params.get('role')
+    search = str(request.query_params.get('search') or '').strip().lower()
+    specialization = str(request.query_params.get('specialization') or '').strip().lower()
+    group = str(request.query_params.get('group') or '').strip().lower()
+    try:
+        limit = max(1, min(int(request.query_params.get('limit', 100)), 500))
+    except ValueError:
+        limit = 100
+    try:
+        offset = max(0, int(request.query_params.get('offset', 0)))
+    except ValueError:
+        offset = 0
     query = {'is_active': True}
     if role in [User.ROLE_ANNOTATOR, User.ROLE_REVIEWER]:
         query['role'] = role
 
-    users = User.objects(**query).order_by('username')
+    users = list(User.objects(**query).order_by('username'))
+    if search:
+        users = [
+            candidate
+            for candidate in users
+            if search in str(candidate.username or '').lower() or search in str(candidate.email or '').lower()
+        ]
+    if specialization:
+        users = [candidate for candidate in users if specialization in str(candidate.specialization or '').lower()]
+    if group:
+        users = [
+            candidate
+            for candidate in users
+            if group in str(candidate.group_name or '').lower()
+            or any(group in str(item or '').lower() for item in (candidate.groups or []))
+        ]
+    total = len(users)
+    users = users[offset:offset + limit]
     return Response({
         'items': [
             {
@@ -429,7 +457,10 @@ def participants_view(request):
                 'experience_level': candidate.experience_level,
             }
             for candidate in users
-        ]
+        ],
+        'limit': limit,
+        'offset': offset,
+        'total': total,
     })
 
 

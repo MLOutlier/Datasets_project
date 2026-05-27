@@ -235,6 +235,13 @@ export default function ProjectWorkflowPage() {
     onSuccess: async () => {
       setError(null);
       await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      const synced = (await workflowAPI.sync(projectId!)) as any;
+      const rebalance = synced?.sync?.assignment_rebalance?.bbox_annotation || synced?.sync?.assignment_rebalance?.video_annotation;
+      if (rebalance) {
+        setDistributionResult(
+          `Workflow synced: redistributed ${rebalance.created || 0} assignments and removed ${rebalance.removed || 0} stale open assignments.`
+        );
+      }
       await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
     },
     onError: (err: any) => {
@@ -248,9 +255,13 @@ export default function ProjectWorkflowPage() {
       return projectsAPI.importParticipantsCsv(projectId, participantsCsv);
     },
     onSuccess: async (result) => {
-      setDistributionResult(
-        `CSV import complete: created ${result.created_users}, linked ${result.linked_memberships}, skipped ${result.skipped_rows}.`
-      );
+      const url = URL.createObjectURL(result);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `project-${projectId}-participant-credentials.csv`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setDistributionResult("CSV import complete. Credentials file has been downloaded.");
       await queryClient.invalidateQueries({ queryKey: ["participants", "annotator"] });
       await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
       await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });

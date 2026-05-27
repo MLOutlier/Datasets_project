@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { annotatorAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { getTaskFlowCopy, getTaskGroupLabel } from "../lib/taskFlowCopy";
+import { InstructionGate, InstructionPanel } from "../components/InstructionPanel";
 
 export default function AnnotatorProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -59,6 +60,7 @@ export default function AnnotatorProjectPage() {
   const intervalChunkCount = (intervalChunkQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
   const intervalValidationCount = (intervalValidationQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
   const bboxValidationCount = (bboxValidationQuery.data?.items ?? []).filter((item: any) => item.project_id === project.project_id).length;
+  const instructionsAcknowledged = project.instructions_bundle?.acknowledgement?.acknowledged ?? true;
 
   return (
     <div className="space-y-6">
@@ -150,7 +152,7 @@ export default function AnnotatorProjectPage() {
                 type="button"
                 className="btn-primary mt-4 w-full"
                 onClick={() => nextAssignmentMutation.mutate()}
-                disabled={nextAssignmentMutation.isPending || (!project.active_assignment_id && !project.next_assignment_id)}
+                disabled={nextAssignmentMutation.isPending || !instructionsAcknowledged || (!project.active_assignment_id && !project.next_assignment_id)}
               >
                 {nextAssignmentMutation.isPending ? "Открываем..." : primaryActionLabel}
               </button>
@@ -175,31 +177,8 @@ export default function AnnotatorProjectPage() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr,0.42fr]">
         <div className="card space-y-4">
-          <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Instructions</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-              Перед началом внимательно прочитайте инструкцию. После этого система будет показывать ваши кадры по очереди.
-            </p>
-          </div>
-
-          <div className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
-            {project.instructions || "Инструкция пока не добавлена."}
-          </div>
-
-          {project.instructions_file_uri ? (
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-gray-950">
-              <div className="font-medium text-gray-900 dark:text-white">Прикрепленный файл инструкции</div>
-              <div className="mt-2">
-                <a className="text-blue-600 hover:underline dark:text-blue-400" href={project.instructions_file_uri} target="_blank" rel="noreferrer">
-                  {project.instructions_file_name || "инструкция"}
-                </a>
-              </div>
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                v{project.instructions_version ?? 0}
-                {project.instructions_updated_at ? ` | ${new Date(project.instructions_updated_at).toLocaleString()}` : ""}
-              </div>
-            </div>
-          ) : null}
+          <InstructionGate projectId={project.project_id} bundle={project.instructions_bundle} fallbackText={project.instructions} />
+          <InstructionPanel projectId={project.project_id} bundle={project.instructions_bundle} fallbackText={project.instructions} autoOpen />
 
           {taskType === "bbox_annotation" ? (
             <div className="flex justify-end">
@@ -207,7 +186,7 @@ export default function AnnotatorProjectPage() {
                 type="button"
                 className="btn-primary"
                 onClick={() => nextAssignmentMutation.mutate()}
-                disabled={nextAssignmentMutation.isPending || (!project.active_assignment_id && !project.next_assignment_id)}
+                disabled={nextAssignmentMutation.isPending || !instructionsAcknowledged || (!project.active_assignment_id && !project.next_assignment_id)}
               >
                 {nextAssignmentMutation.isPending ? "Открываем..." : primaryActionLabel}
               </button>

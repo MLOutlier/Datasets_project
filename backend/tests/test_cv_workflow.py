@@ -1,4 +1,6 @@
 import io
+from pathlib import Path
+
 import pytest
 from PIL import Image
 
@@ -11,17 +13,33 @@ from apps.cv_annotation.models import (
     GoldenFrame,
     ImportAsset,
     ImportSession,
+    IntervalValidationAssignment,
     ReviewRecord,
+    VideoInterval,
     WorkAnnotation,
     WorkItem,
 )
 from apps.cv_annotation.services.workflow import (
     _build_golden_validation_question,
     compare_bbox_annotations,
+    ensure_interval_validation_assignments,
+    materialize_bbox_annotation_interval_source,
+    materialize_interval_validation_source,
     maybe_create_hidden_golden_assignment,
     submit_bbox_validation_assignment,
     submit_golden_annotation_assignment,
+    validator_interval_queue,
 )
+from apps.projects.task_registry import (
+    TASK_BBOX_ANNOTATION,
+    TASK_VIDEO_ANNOTATION,
+    TASK_VIDEO_INTERVAL_VALIDATION,
+    WIDGET_BBOX,
+    WIDGET_INTERVAL_VALIDATION,
+    WIDGET_VIDEO_INTERVALS,
+    source_task_types_for_task,
+)
+from apps.users.models import User
 from apps.projects.models import Project, ProjectMembership
 from apps.users.serializers import create_access_token
 
@@ -80,11 +98,225 @@ def make_cv_frame(project, owner, frame_number=1):
     return frame
 
 
+def make_video_interval_source(owner, author, validator):
+    source_project = Project(
+        owner=owner,
+        title="Interval annotation source",
+        project_type=Project.TYPE_CV,
+        annotation_type=Project.ANNOTATION_BBOX,
+        task_type=TASK_VIDEO_ANNOTATION,
+        widget_type=WIDGET_VIDEO_INTERVALS,
+        allowed_annotators=[author, validator],
+        assignments_per_task=1,
+        participant_rules={"assignment_scope": "selected_only"},
+    ).save()
+    for user in (author, validator):
+        ProjectMembership(project=source_project, user=user, role=ProjectMembership.ROLE_ANNOTATOR, is_active=True).save()
+    import_session = ImportSession(project=source_project, created_by=owner, status=ImportSession.STATUS_FINALIZED).save()
+    asset = ImportAsset(
+        import_session=import_session,
+        project=source_project,
+        file_uri="/media/projects/test/source.mp4",
+        file_name="source.mp4",
+        file_size=128,
+        mime_type="video/mp4",
+        asset_type=ImportAsset.TYPE_VIDEO,
+        processing_status=ImportAsset.STATUS_PROCESSED,
+    ).save()
+    interval = VideoInterval(
+        project=source_project,
+        asset=asset,
+        start_frame=10,
+        end_frame=20,
+        start_sec=10.0,
+        end_sec=20.0,
+        status=VideoInterval.STATUS_DRAFT,
+        source=VideoInterval.SOURCE_MANUAL,
+        confidence=1.0,
+        created_by=author,
+    ).save()
+    validation_project = Project(
+        owner=owner,
+        title="Interval validation",
+        project_type=Project.TYPE_CV,
+        annotation_type=Project.ANNOTATION_BBOX,
+        task_type=TASK_VIDEO_INTERVAL_VALIDATION,
+        widget_type=WIDGET_INTERVAL_VALIDATION,
+        source_project=source_project,
+        allowed_annotators=[author, validator],
+        assignments_per_task=1,
+        participant_rules={"assignment_scope": "selected_only", "interval_validators_per_item": 1},
+    ).save()
+    for user in (author, validator):
+        ProjectMembership(project=validation_project, user=user, role=ProjectMembership.ROLE_ANNOTATOR, is_active=True).save()
+    return source_project, validation_project, asset, interval
+
+
+@pytest.mark.django_db
+class TestIntervalValidationMedia:
+    def test_interval_validation_assigns_other_annotator_only(self, user_customer, user_annotator, monkeypatch):
+        validator = User(email="validator@example.com", username="validator_user", role=User.ROLE_ANNOTATOR)
+        validator.set_password("test-password-for-dev-only")
+        validator.save()
+        _, validation_project, _, source_interval = make_video_interval_source(user_customer, user_annotator, validator)
+
+        created = materialize_interval_validation_source(validation_project)
+        assert created == 1
+        copied = VideoInterval.objects(project=validation_project).first()
+        assert copied is not None
+        assert copied.created_by == user_annotator
+        assert (copied.metadata or {}).get("source_interval_id") == str(source_interval.id)
+
+        assigned = ensure_interval_validation_assignments(validation_project, min_validators=1)
+        assert assigned == 1
+        assignment = IntervalValidationAssignment.objects(project=validation_project).first()
+        assert assignment is not None
+        assert assignment.validator == validator
+        assert assignment.validator != copied.created_by
+
+        monkeypatch.setattr(
+            "apps.cv_annotation.services.workflow._ensure_interval_review_clip",
+            lambda interval, padding_sec=None: {"ready": True, "clip_uri": "/media/projects/test/review.mp4", "uri": "/media/projects/test/review.mp4"},
+        )
+        assert validator_interval_queue(user_annotator) == []
+        assert validator_interval_queue(validator)[0]["assignment_id"] == str(assignment.id)
+
+    def test_interval_validation_queue_prefers_review_clip(self, user_customer, user_annotator, monkeypatch):
+        validator = User(email="validator2@example.com", username="validator_user2", role=User.ROLE_ANNOTATOR)
+        validator.set_password("test-password-for-dev-only")
+        validator.save()
+        _, validation_project, _, _ = make_video_interval_source(user_customer, user_annotator, validator)
+        materialize_interval_validation_source(validation_project)
+        ensure_interval_validation_assignments(validation_project, min_validators=1)
+
+        monkeypatch.setattr(
+            "apps.cv_annotation.services.workflow._ensure_interval_review_clip",
+            lambda interval, padding_sec=None: {"ready": True, "clip_uri": "/media/projects/test/review.mp4", "uri": "/media/projects/test/review.mp4", "start_sec": 8.0},
+        )
+
+        item = validator_interval_queue(validator)[0]
+        assert item["media_uri"] == "/media/projects/test/review.mp4"
+        assert item["media_kind"] == "clip"
+        assert item["media_ready"] is True
+        assert item["clip_ready"] is True
+
+    def test_interval_validation_queue_falls_back_to_source_video(self, user_customer, user_annotator, monkeypatch, settings):
+        validator = User(email="validator3@example.com", username="validator_user3", role=User.ROLE_ANNOTATOR)
+        validator.set_password("test-password-for-dev-only")
+        validator.save()
+        _, validation_project, asset, _ = make_video_interval_source(user_customer, user_annotator, validator)
+        source_path = Path(settings.MEDIA_ROOT) / "projects" / "test" / "source.mp4"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(b"not-a-real-video")
+        materialize_interval_validation_source(validation_project)
+        ensure_interval_validation_assignments(validation_project, min_validators=1)
+
+        monkeypatch.setattr(
+            "apps.cv_annotation.services.workflow._ensure_interval_review_clip",
+            lambda interval, padding_sec=None: {"ready": False, "reason": "ffmpeg_unavailable"},
+        )
+
+        item = validator_interval_queue(validator)[0]
+        assert item["media_uri"] == asset.file_uri
+        assert item["media_kind"] == "source"
+        assert item["media_ready"] is True
+        assert item["media_reason"] == "ffmpeg_unavailable"
+
+    def test_bbox_annotation_source_is_previous_validated_interval_stage(self):
+        assert source_task_types_for_task(TASK_VIDEO_INTERVAL_VALIDATION) == (TASK_VIDEO_ANNOTATION,)
+        assert source_task_types_for_task(TASK_BBOX_ANNOTATION) == (TASK_VIDEO_INTERVAL_VALIDATION,)
+
+    def test_bbox_source_materialization_merges_overlapping_validated_intervals(self, user_customer, user_annotator):
+        source_project = Project(
+            owner=user_customer,
+            title="Video source",
+            project_type=Project.TYPE_CV,
+            annotation_type=Project.ANNOTATION_BBOX,
+            task_type=TASK_VIDEO_ANNOTATION,
+            widget_type=WIDGET_VIDEO_INTERVALS,
+            allowed_annotators=[user_annotator],
+        ).save()
+        import_session = ImportSession(project=source_project, created_by=user_customer, status=ImportSession.STATUS_FINALIZED).save()
+        asset = ImportAsset(
+            import_session=import_session,
+            project=source_project,
+            file_uri="/media/projects/test/source.mp4",
+            file_name="source.mp4",
+            file_size=128,
+            mime_type="video/mp4",
+            asset_type=ImportAsset.TYPE_VIDEO,
+            processing_status=ImportAsset.STATUS_PROCESSED,
+        ).save()
+        for frame_number in range(1, 31):
+            FrameItem(
+                project=source_project,
+                asset=asset,
+                frame_uri=f"/media/projects/test/frames/frame_{frame_number:06d}.jpg",
+                frame_number=frame_number,
+                timestamp_sec=float(frame_number),
+                width=128,
+                height=96,
+            ).save()
+        validation_project = Project(
+            owner=user_customer,
+            title="Validated intervals",
+            project_type=Project.TYPE_CV,
+            annotation_type=Project.ANNOTATION_BBOX,
+            task_type=TASK_VIDEO_INTERVAL_VALIDATION,
+            widget_type=WIDGET_INTERVAL_VALIDATION,
+            source_project=source_project,
+            allowed_annotators=[user_annotator],
+        ).save()
+        VideoInterval(
+            project=validation_project,
+            asset=asset,
+            start_frame=10,
+            end_frame=20,
+            start_sec=10.0,
+            end_sec=20.0,
+            status=VideoInterval.STATUS_APPROVED,
+            source=VideoInterval.SOURCE_MANUAL,
+            created_by=user_annotator,
+        ).save()
+        VideoInterval(
+            project=validation_project,
+            asset=asset,
+            start_frame=15,
+            end_frame=25,
+            start_sec=15.0,
+            end_sec=25.0,
+            status=VideoInterval.STATUS_APPROVED,
+            source=VideoInterval.SOURCE_MANUAL,
+            created_by=user_annotator,
+        ).save()
+        bbox_project = Project(
+            owner=user_customer,
+            title="BBox from validated intervals",
+            project_type=Project.TYPE_CV,
+            annotation_type=Project.ANNOTATION_BBOX,
+            task_type=TASK_BBOX_ANNOTATION,
+            widget_type=WIDGET_BBOX,
+            source_project=validation_project,
+            allowed_annotators=[user_annotator],
+            assignments_per_task=1,
+        ).save()
+
+        created = materialize_bbox_annotation_interval_source(bbox_project)
+
+        assert created == 16
+        work_items = list(WorkItem.objects(project=bbox_project))
+        assert len(work_items) == 16
+        assert sorted(item.frame.frame_number for item in work_items) == list(range(10, 26))
+        assert len({(item.workflow_meta or {}).get("source_frame_id") for item in work_items}) == 16
+        assert materialize_bbox_annotation_interval_source(bbox_project) == 0
+
+
 @pytest.mark.django_db
 class TestGoldenDatasetWorkflow:
     def test_validation_probe_generation_sets_expected_decisions_and_breaks_geometry(self, user_customer):
         project = make_cv_project(user_customer)
         frame = make_cv_frame(project, user_customer)
+        frame_negative = make_cv_frame(project, user_customer, frame_number=2)
         reference = {"boxes": [{"x": 10, "y": 10, "width": 24, "height": 18, "label": "drone"}]}
         golden = GoldenFrame(
             project=project,
@@ -237,6 +469,79 @@ class TestGoldenDatasetWorkflow:
         )
         assert retire_response.status_code == 200
         assert retire_response.data["status"] == GoldenFrame.STATUS_RETIRED
+
+    def test_customer_can_create_manual_positive_and_negative_golden_cases(self, client, auth_headers, user_customer):
+        project = make_cv_project(user_customer)
+        frame = make_cv_frame(project, user_customer)
+        reference = {"boxes": [{"x": 10, "y": 10, "width": 20, "height": 20, "label": "drone"}]}
+        negative_probe = {"boxes": [{"x": 80, "y": 80, "width": 20, "height": 20, "label": "drone"}]}
+
+        positive_response = client.post(
+            f"/api/projects/{project.id}/golden-candidates/",
+            {
+                "frame_id": str(frame_negative.id),
+                "case_type": "positive",
+                "status": "active",
+                "reference_annotation": reference,
+            },
+            **auth_headers,
+            format="json",
+        )
+        assert positive_response.status_code == 201
+        assert positive_response.data["case_type"] == "positive"
+        assert positive_response.data["expected_decision"] == "approve"
+        assert positive_response.data["status"] == GoldenFrame.STATUS_ACTIVE
+
+        negative_response = client.post(
+            f"/api/projects/{project.id}/golden-candidates/",
+            {
+                "frame_id": str(frame.id),
+                "case_type": "negative",
+                "status": "candidate",
+                "reference_annotation": reference,
+                "probe_annotation": negative_probe,
+                "issue_type": "bad_geometry",
+            },
+            **auth_headers,
+            format="json",
+        )
+        assert negative_response.status_code == 201
+        assert negative_response.data["case_type"] == "negative"
+        assert negative_response.data["expected_decision"] == "needs_changes"
+        assert negative_response.data["issue_type"] == "bad_geometry"
+
+    def test_negative_golden_is_not_used_as_annotation_hidden_task(self, user_customer, user_annotator):
+        project = make_cv_project(
+            user_customer,
+            annotators=[user_annotator],
+            participant_rules={"annotation_golden_interval": 1},
+        )
+        frame = make_cv_frame(project, user_customer)
+        reference = {"boxes": [{"x": 12, "y": 14, "width": 25, "height": 16, "label": "drone"}]}
+        source_item = WorkItem(
+            project=project,
+            frame=frame,
+            status=WorkItem.STATUS_COMPLETED,
+            final_annotation=reference,
+            validation_status=WorkItem.VALIDATION_APPROVED,
+        ).save()
+        GoldenFrame(
+            project=project,
+            frame=frame,
+            reference_annotation=reference,
+            probe_annotation={"boxes": []},
+            source_work_item=source_item,
+            case_type=GoldenFrame.CASE_NEGATIVE,
+            status=GoldenFrame.STATUS_ACTIVE,
+        ).save()
+        Assignment(
+            project=project,
+            work_item=source_item,
+            annotator=user_annotator,
+            status=Assignment.STATUS_SUBMITTED,
+        ).save()
+
+        assert maybe_create_hidden_golden_assignment(project, user_annotator) is None
 
 
 @pytest.mark.django_db

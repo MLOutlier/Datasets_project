@@ -23,11 +23,13 @@ from .task_registry import TASK_BBOX_ANNOTATION, TASK_TYPE_CHOICES, WIDGET_BBOX,
 class Project(Document):
     STATUS_OPEN = "open"
     STATUS_ACTIVE = "active"
+    STATUS_PAUSED = "paused"
     STATUS_CLOSED = "closed"
 
     STATUS_CHOICES = (
         (STATUS_OPEN, "open"),
         (STATUS_ACTIVE, "active"),
+        (STATUS_PAUSED, "paused"),
         (STATUS_CLOSED, "closed"),
     )
 
@@ -109,6 +111,7 @@ class ProjectMembership(Document):
     role = StringField(required=True, choices=[c[0] for c in ROLE_CHOICES])
     specialization = StringField(default="", max_length=255)
     group_name = StringField(default="", max_length=255)
+    groups = ListField(StringField(max_length=100), default=list)
     is_active = BooleanField(default=True)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)
@@ -125,6 +128,64 @@ class ProjectMembership(Document):
     def save(self, *args, **kwargs):
         self.updated_at = datetime.utcnow()
         return super().save(*args, **kwargs)
+
+
+class ProjectInstructionAsset(Document):
+    TYPE_INSTRUCTION = "instruction"
+    TYPE_LINK = "link"
+    TYPE_EMBEDDED = "embedded"
+    TYPE_GOOD_EXAMPLE = "good_example"
+    TYPE_BAD_EXAMPLE = "bad_example"
+    TYPE_ANNOTATED_EXAMPLE = "annotated_example"
+
+    TYPE_CHOICES = (
+        (TYPE_INSTRUCTION, "instruction"),
+        (TYPE_LINK, "link"),
+        (TYPE_EMBEDDED, "embedded"),
+        (TYPE_GOOD_EXAMPLE, "good_example"),
+        (TYPE_BAD_EXAMPLE, "bad_example"),
+        (TYPE_ANNOTATED_EXAMPLE, "annotated_example"),
+    )
+
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    created_by = ReferenceField(User, null=True, reverse_delete_rule=CASCADE)
+    asset_type = StringField(required=True, choices=[c[0] for c in TYPE_CHOICES], default=TYPE_INSTRUCTION)
+    title = StringField(default="", max_length=255)
+    body = StringField(default="", max_length=12000)
+    url = StringField(default="", max_length=2048)
+    file_uri = StringField(default="", max_length=2048)
+    file_name = StringField(default="", max_length=512)
+    mime_type = StringField(default="", max_length=255)
+    file_size = IntField(default=0, min_value=0)
+    label_data = DictField(default=dict)
+    metadata = DictField(default=dict)
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "project_instruction_assets",
+        "indexes": ["project", "asset_type", "created_by", ("project", "created_at")],
+    }
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
+
+class InstructionAcknowledgement(Document):
+    project = ReferenceField(Project, required=True, reverse_delete_rule=CASCADE)
+    user = ReferenceField(User, required=True, reverse_delete_rule=CASCADE)
+    instructions_version = IntField(default=0, min_value=0)
+    acknowledged_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        "collection": "instruction_acknowledgements",
+        "indexes": [
+            "project",
+            "user",
+            ("project", "user", "-acknowledged_at"),
+        ],
+    }
 
 
 class Task(Document):

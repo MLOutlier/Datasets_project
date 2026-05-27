@@ -6,7 +6,10 @@ import { projectsAPI, workflowAPI, dawidSkeneAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
 import { getTaskFlowCopy, getTaskGroupLabel } from "../lib/taskFlowCopy";
-import type { ProjectExportArtifact, ProjectExportArtifactName, ProjectExportFormat } from "../types";
+import type { GoldenSourceFrame, ProjectExportArtifact, ProjectExportArtifactName, ProjectExportFormat } from "../types";
+
+const EMPTY_GOLDEN_BOX = { x: 0, y: 0, width: 100, height: 100, label: "drone" };
+type GoldenBox = { x: number; y: number; width: number; height: number; label: string };
 
 function DawidSkeneQuality({ projectId }: { projectId: string }) {
   const qualityQuery = useQuery({
@@ -166,6 +169,16 @@ export default function ProjectDetailPage() {
   const [genericTasksInput, setGenericTasksInput] = useState("");
   const [genericTasksFile, setGenericTasksFile] = useState<File | null>(null);
   const [genericTasksError, setGenericTasksError] = useState<string | null>(null);
+  const [goldenFrameId, setGoldenFrameId] = useState("");
+  const [goldenCaseType, setGoldenCaseType] = useState<"positive" | "negative">("positive");
+  const [goldenIssueType, setGoldenIssueType] = useState("manual_positive");
+  const [goldenStatus, setGoldenStatus] = useState<"candidate" | "active">("candidate");
+  const [goldenAnnotationJson, setGoldenAnnotationJson] = useState(JSON.stringify({ boxes: [EMPTY_GOLDEN_BOX] }, null, 2));
+  const [goldenProbeJson, setGoldenProbeJson] = useState(JSON.stringify({ boxes: [] }, null, 2));
+  const [goldenCreateError, setGoldenCreateError] = useState<string | null>(null);
+  const [goldenFrameSearch, setGoldenFrameSearch] = useState("");
+  const [selectedGoldenFrame, setSelectedGoldenFrame] = useState<GoldenSourceFrame | null>(null);
+  const [goldenBoxes, setGoldenBoxes] = useState<GoldenBox[]>([]);
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -178,16 +191,17 @@ export default function ProjectDetailPage() {
     queryFn: () => workflowAPI.overview(projectId!),
     enabled: !!projectId,
   });
-  const securityEventsQuery = useQuery({
-    queryKey: ["project-security-events", projectId],
-    queryFn: () => workflowAPI.securityEvents(projectId!),
-    enabled: !!projectId,
-  });
   const goldenCandidatesQuery = useQuery({
     queryKey: ["project-golden-candidates", projectId],
     queryFn: () => workflowAPI.goldenCandidates(projectId!),
     enabled: !!projectId,
   });
+  const goldenSourceFramesQuery = useQuery({
+    queryKey: ["project-golden-source-frames", projectId, goldenFrameSearch],
+    queryFn: () => workflowAPI.goldenSourceFrames(projectId!, { search: goldenFrameSearch || undefined, limit: 80 }),
+    enabled: !!projectId,
+  });
+  const securityEventsQuery = { isFetching: false, data: { items: [] as any[] } };
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
@@ -267,7 +281,6 @@ export default function ProjectDetailPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
       await queryClient.invalidateQueries({ queryKey: ["project-golden-candidates", projectId] });
-      await queryClient.invalidateQueries({ queryKey: ["project-security-events", projectId] });
     },
   });
 
@@ -297,7 +310,6 @@ export default function ProjectDetailPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["project-golden-candidates", projectId] });
       await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
-      await queryClient.invalidateQueries({ queryKey: ["project-security-events", projectId] });
     },
   });
   const genericTasksQuery = useQuery({
@@ -312,9 +324,100 @@ export default function ProjectDetailPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["project-golden-candidates", projectId] });
       await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
-      await queryClient.invalidateQueries({ queryKey: ["project-security-events", projectId] });
     },
   });
+
+  const pauseProjectMutation = useMutation({
+    mutationFn: async () => {
+      if (!projectId) throw new Error("Project id missing");
+      const project = projectQuery.data;
+      return project?.status === "paused" ? projectsAPI.resume(projectId) : projectsAPI.pause(projectId);
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await queryClient.invalidateQueries({ queryKey: ["annotator-projects"] });
+    },
+  });
+
+  const createGoldenMutation = useMutation({
+    mutationFn: async () => {
+      if (!projectId) throw new Error("Project id missing");
+      const reference = JSON.parse(goldenAnnotationJson || "{}");
+      const probe = goldenCaseType === "negative" ? JSON.parse(goldenProbeJson || "{}") : reference;
+      return workflowAPI.createGoldenCandidate(projectId, {
+        frame_id: goldenFrameId.trim(),
+        case_type: goldenCaseType,
+        usage: "both",
+        expected_decision: goldenCaseType === "negative" ? "needs_changes" : "approve",
+        issue_type: goldenIssueType || (goldenCaseType === "negative" ? "manual_negative" : "manual_positive"),
+        status: goldenStatus,
+        reference_annotation: reference,
+        probe_annotation: probe,
+        review_notes: "manual golden case",
+      });
+    },
+    onSuccess: async () => {
+      setGoldenCreateError(null);
+      setGoldenFrameId("");
+      await queryClient.invalidateQueries({ queryKey: ["project-golden-candidates", projectId] });
+      await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
+    },
+    onError: (err: any) => {
+      setGoldenCreateError(err?.response?.data?.detail || err?.message || "Не удалось создать golden-кейс. Проверьте frame_id и JSON разметки.");
+    },
+  });
+
+  const createVisualGoldenMutation = useMutation({
+    mutationFn: async () => {
+      if (!projectId || !selectedGoldenFrame) throw new Error("Select a frame first");
+      const reference = { boxes: goldenBoxes };
+      return workflowAPI.createGoldenCandidate(projectId, {
+        frame_id: selectedGoldenFrame.frame_id,
+        case_type: goldenCaseType,
+        usage: "both",
+        expected_decision: goldenCaseType === "negative" ? "needs_changes" : "approve",
+        issue_type: goldenIssueType || (goldenCaseType === "negative" ? "manual_negative" : "manual_positive"),
+        status: goldenStatus,
+        reference_annotation: reference,
+        probe_annotation: goldenCaseType === "negative" ? { boxes: [] } : reference,
+        review_notes: "visual golden case",
+      });
+    },
+    onSuccess: async () => {
+      setGoldenCreateError(null);
+      await queryClient.invalidateQueries({ queryKey: ["project-golden-candidates", projectId] });
+      await queryClient.invalidateQueries({ queryKey: ["project-golden-source-frames", projectId] });
+      await queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
+    },
+    onError: (err: any) => {
+      setGoldenCreateError(err?.response?.data?.detail || err?.message || "Failed to save golden case.");
+    },
+  });
+
+  const selectGoldenFrame = (frame: GoldenSourceFrame) => {
+    setSelectedGoldenFrame(frame);
+    const boxes = ((frame.reference_annotation as any)?.boxes ?? []) as GoldenBox[];
+    setGoldenBoxes(boxes.length ? boxes.map((box) => ({
+      x: Number(box.x || 0),
+      y: Number(box.y || 0),
+      width: Number(box.width || 0),
+      height: Number(box.height || 0),
+      label: String(box.label || projectQuery.data?.label_schema?.[0]?.name || "object"),
+    })) : []);
+    setGoldenFrameId(frame.frame_id);
+  };
+
+  const updateGoldenBox = (index: number, patch: Partial<GoldenBox>) => {
+    setGoldenBoxes((current) => current.map((box, boxIndex) => boxIndex === index ? { ...box, ...patch } : box));
+  };
+
+  const addGoldenBox = () => {
+    setGoldenBoxes((current) => [
+      ...current,
+      { x: 0, y: 0, width: 100, height: 100, label: projectQuery.data?.label_schema?.[0]?.name || "object" },
+    ]);
+  };
 
   const instructionUploadMutation = useMutation({
     mutationFn: async () => {
@@ -359,6 +462,8 @@ export default function ProjectDetailPage() {
   const taskType = String(projectQuery.data?.task_type || "bbox_annotation");
   const taskCopy = getTaskFlowCopy(taskType);
   const isGenericTask = ["text_annotation", "image_annotation", "classification", "comparison"].includes(taskType);
+  const isIntervalProject = taskType.includes("interval");
+  const isBBoxProject = taskType.includes("bbox");
   const isValidationTask = ["video_interval_validation", "bbox_validation"].includes(taskType);
   const canUploadMedia = ["bbox_annotation", "video_annotation", "image_annotation"].includes(taskType);
   const lastUploadPreview = uploadMutation.data?.preview;
@@ -410,6 +515,12 @@ export default function ProjectDetailPage() {
   const goldenActiveCount = Number(goldenCandidatesQuery.data?.active_count ?? 0);
   const goldenCandidateCount = Number(goldenCandidatesQuery.data?.candidate_count ?? 0);
   const goldenRetiredCount = Number(goldenCandidatesQuery.data?.retired_count ?? 0);
+  const activeGolden = goldenCandidates.filter((item) => item.status === "active");
+  const activePositiveGolden = activeGolden.filter((item) => (item.case_type || "positive") === "positive").length;
+  const activeNegativeGolden = activeGolden.filter((item) => item.case_type === "negative").length;
+  const diversityBucketCount = new Set(activeGolden.map((item) => item.diversity_bucket || `${item.asset_id || ""}:${Math.floor(Number(item.timestamp_sec || 0) / 30)}`)).size;
+  const goldenNeedsReview = goldenActiveCount === 0 && goldenCandidateCount > 0;
+  const goldenBalanceWarning = goldenActiveCount > 0 && activeNegativeGolden === 0;
   const bboxValidationAssigned = Number(overviewAny?.bbox_validation?.assigned || 0);
   const canDeleteProject = user?.role === "admin" || (user?.role === "customer" && projectQuery.data?.owner_id === user.id);
   const sourceSync = overview?.source_sync;
@@ -486,6 +597,9 @@ export default function ProjectDetailPage() {
           <button className="btn-secondary" onClick={() => syncWorkflowMutation.mutate()} disabled={syncWorkflowMutation.isPending}>
             {syncWorkflowMutation.isPending ? "Синхронизируем..." : "Синхронизировать"}
           </button>
+          <button className="btn-secondary" onClick={() => pauseProjectMutation.mutate()} disabled={pauseProjectMutation.isPending}>
+            {projectQuery.data.status === "paused" ? "Resume project" : "Pause project"}
+          </button>
           {canDeleteProject ? (
             <button
               className="btn-secondary border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950"
@@ -502,6 +616,12 @@ export default function ProjectDetailPage() {
         </div>
       </div>
       {deleteError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{deleteError}</div> : null}
+
+      {projectQuery.data.status === "paused" ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+          Project is paused. Executors cannot receive or submit tasks until it is resumed.
+        </div>
+      ) : null}
 
       {nextAction ? (
         <div className={`rounded-lg border p-4 text-sm ${nextAction.severity === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100" : nextAction.severity === "warning" ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100" : "border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100"}`}>
@@ -718,12 +838,164 @@ export default function ProjectDetailPage() {
           <div>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Golden pool</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-              Hidden quality-control set for annotation and validation. Active items are mixed into executor queues without visible labels.
+              Контрольный набор для проверки честности. Если active golden есть, часть задач подмешивается исполнителям без видимой пометки.
             </p>
           </div>
           <div className="text-sm text-gray-500 dark:text-gray-400">
             Active: {goldenActiveCount} · Candidates: {goldenCandidateCount} · Retired: {goldenRetiredCount}
           </div>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+            <div className="text-xs text-gray-500 dark:text-gray-400">Good / bad active</div>
+            <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{activePositiveGolden}/{activeNegativeGolden}</div>
+          </div>
+          <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+            <div className="text-xs text-gray-500 dark:text-gray-400">Diversity buckets</div>
+            <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{diversityBucketCount}</div>
+          </div>
+          <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+            <div className="text-xs text-gray-500 dark:text-gray-400">Автосбор</div>
+            <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{goldenCandidateCount ? "Есть кандидаты" : "Ожидает consensus"}</div>
+          </div>
+          <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+            <div className="text-xs text-gray-500 dark:text-gray-400">Контроль</div>
+            <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{goldenActiveCount ? "Активен" : "Bootstrap"}</div>
+          </div>
+        </div>
+        {goldenNeedsReview ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+            Golden dataset еще не активен: система нашла {goldenCandidateCount} кандидатов с высоким согласием. Примите подходящие кейсы, чтобы включить скрытый контроль.
+          </div>
+        ) : null}
+        {goldenBalanceWarning ? (
+          <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
+            В active golden pool пока нет negative-кейсов. Для validation/control добавьте плохие примеры вручную, чтобы проверять не только принятие правильной разметки.
+          </div>
+        ) : null}
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr,1.1fr]">
+          <div className="space-y-3">
+            <input className="input-field" value={goldenFrameSearch} onChange={(event) => setGoldenFrameSearch(event.target.value)} placeholder="Search frames" />
+            <div className="max-h-[520px] overflow-auto rounded-lg border border-gray-200 dark:border-gray-800">
+              {(goldenSourceFramesQuery.data?.items ?? []).map((frame) => {
+                const active = selectedGoldenFrame?.frame_id === frame.frame_id;
+                return (
+                  <button
+                    key={frame.frame_id}
+                    type="button"
+                    className={`flex w-full gap-3 border-b border-gray-100 p-3 text-left text-sm last:border-b-0 dark:border-gray-800 ${active ? "bg-blue-50 dark:bg-blue-950" : "bg-white hover:bg-gray-50 dark:bg-gray-950 dark:hover:bg-gray-900"}`}
+                    onClick={() => selectGoldenFrame(frame)}
+                  >
+                    <img src={frame.frame_url} alt={`Frame ${frame.frame_number}`} className="h-16 w-24 rounded object-cover" />
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-gray-900 dark:text-white">Frame {frame.frame_number}</div>
+                      <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{frame.golden_status || "none"} {frame.case_type ? `/${frame.case_type}` : ""}</div>
+                    </div>
+                  </button>
+                );
+              })}
+              {goldenSourceFramesQuery.isLoading ? <div className="p-4"><LoadingSpinner size="sm" /></div> : null}
+              {!goldenSourceFramesQuery.isLoading && (goldenSourceFramesQuery.data?.items ?? []).length === 0 ? (
+                <div className="p-4 text-sm text-gray-500">No frames found.</div>
+              ) : null}
+            </div>
+          </div>
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+            <div className="font-semibold text-gray-900 dark:text-white">Visual golden case</div>
+            {selectedGoldenFrame ? (
+              <div className="mt-3 space-y-3">
+                <div className="overflow-hidden rounded bg-black">
+                  <div className="relative">
+                    <img src={selectedGoldenFrame.frame_url} alt={`Frame ${selectedGoldenFrame.frame_number}`} className="block h-auto w-full" />
+                    {goldenBoxes.map((box, index) => (
+                      <div
+                        key={`${index}-${box.label}`}
+                        className="absolute border-2 border-emerald-400"
+                        style={{
+                          left: `${(Number(box.x || 0) / Math.max(Number(selectedGoldenFrame.width || 1), 1)) * 100}%`,
+                          top: `${(Number(box.y || 0) / Math.max(Number(selectedGoldenFrame.height || 1), 1)) * 100}%`,
+                          width: `${(Number(box.width || 0) / Math.max(Number(selectedGoldenFrame.width || 1), 1)) * 100}%`,
+                          height: `${(Number(box.height || 0) / Math.max(Number(selectedGoldenFrame.height || 1), 1)) * 100}%`,
+                        }}
+                      >
+                        <span className="absolute -top-5 left-0 rounded bg-black/80 px-1.5 py-0.5 text-[10px] text-white">{box.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  <select className="input-field" value={goldenCaseType} onChange={(event) => setGoldenCaseType(event.target.value as "positive" | "negative")}>
+                    <option value="positive">Good annotation</option>
+                    <option value="negative">Bad annotation</option>
+                  </select>
+                  <select className="input-field" value={goldenIssueType} onChange={(event) => setGoldenIssueType(event.target.value)}>
+                    <option value="manual_positive">manual_positive</option>
+                    <option value="missing_box">missing_box</option>
+                    <option value="bad_geometry">bad_geometry</option>
+                    <option value="wrong_label">wrong_label</option>
+                    <option value="extra_box">extra_box</option>
+                    <option value="false_positive">false_positive</option>
+                  </select>
+                  <select className="input-field" value={goldenStatus} onChange={(event) => setGoldenStatus(event.target.value as "candidate" | "active")}>
+                    <option value="candidate">Candidate</option>
+                    <option value="active">Active</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  {goldenBoxes.map((box, index) => (
+                    <div key={index} className="grid grid-cols-2 gap-2 md:grid-cols-6">
+                      <input className="input-field" value={box.label} onChange={(event) => updateGoldenBox(index, { label: event.target.value })} placeholder="label" />
+                      {(["x", "y", "width", "height"] as const).map((field) => (
+                        <input key={field} className="input-field" type="number" value={box[field]} onChange={(event) => updateGoldenBox(index, { [field]: Number(event.target.value) } as Partial<GoldenBox>)} placeholder={field} />
+                      ))}
+                      <button type="button" className="btn-secondary" onClick={() => setGoldenBoxes((current) => current.filter((_, boxIndex) => boxIndex !== index))}>Remove</button>
+                    </div>
+                  ))}
+                  <button type="button" className="btn-secondary" onClick={addGoldenBox}>Add box</button>
+                </div>
+                <div className="flex justify-end">
+                  <button className="btn-primary" type="button" onClick={() => createVisualGoldenMutation.mutate()} disabled={createVisualGoldenMutation.isPending || (goldenCaseType === "positive" && goldenBoxes.length === 0)}>
+                    {createVisualGoldenMutation.isPending ? "Saving..." : "Save golden case"}
+                  </button>
+                </div>
+                {goldenCreateError ? <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{goldenCreateError}</div> : null}
+              </div>
+            ) : (
+              <div className="mt-3 rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">Select a frame to create or edit a golden case.</div>
+            )}
+          </div>
+        </div>
+        <div className="hidden">
+          <div className="font-semibold text-gray-900 dark:text-white">Создать golden-кейс вручную</div>
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
+            <input className="input-field" value={goldenFrameId} onChange={(event) => setGoldenFrameId(event.target.value)} placeholder="Frame ID" />
+            <select className="input-field" value={goldenCaseType} onChange={(event) => setGoldenCaseType(event.target.value as "positive" | "negative")}>
+              <option value="positive">Positive</option>
+              <option value="negative">Negative</option>
+            </select>
+            <select className="input-field" value={goldenIssueType} onChange={(event) => setGoldenIssueType(event.target.value)}>
+              <option value="manual_positive">manual_positive</option>
+              <option value="missing_box">missing_box</option>
+              <option value="bad_geometry">bad_geometry</option>
+              <option value="wrong_label">wrong_label</option>
+              <option value="extra_box">extra_box</option>
+              <option value="false_positive">false_positive</option>
+            </select>
+            <select className="input-field" value={goldenStatus} onChange={(event) => setGoldenStatus(event.target.value as "candidate" | "active")}>
+              <option value="candidate">Candidate</option>
+              <option value="active">Active</option>
+            </select>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <textarea className="input-field min-h-[120px] font-mono text-xs" value={goldenAnnotationJson} onChange={(event) => setGoldenAnnotationJson(event.target.value)} />
+            <textarea className="input-field min-h-[120px] font-mono text-xs" value={goldenProbeJson} onChange={(event) => setGoldenProbeJson(event.target.value)} disabled={goldenCaseType === "positive"} />
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button className="btn-primary" type="button" onClick={() => createGoldenMutation.mutate()} disabled={createGoldenMutation.isPending || !goldenFrameId.trim()}>
+              {createGoldenMutation.isPending ? "Создаем..." : "Создать golden-кейс"}
+            </button>
+          </div>
+          {goldenCreateError ? <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{goldenCreateError}</div> : null}
         </div>
         {goldenCandidatesQuery.isLoading ? (
           <LoadingSpinner size="sm" />
@@ -746,6 +1018,8 @@ export default function ProjectDetailPage() {
                       <div className="font-medium text-gray-900 dark:text-white">Frame {candidate.frame_number}</div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                         <span className={`rounded px-2 py-0.5 ${statusTone}`}>{candidate.status || (candidate.is_active ? "active" : "candidate")}</span>
+                        <span>{candidate.case_type || "positive"}</span>
+                        <span>{candidate.issue_type || "auto_consensus"}</span>
                         <span>score {Number(candidate.candidate_score || 0).toFixed(3)}</span>
                         <span>{candidate.candidate_source || "manual"}</span>
                       </div>
@@ -778,7 +1052,10 @@ export default function ProjectDetailPage() {
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-600 dark:text-gray-400">
                     <div>Annotation pass: {Math.round(Number(candidate.stats?.annotation_pass_rate || 0) * 100)}% ({candidate.stats?.annotation_seen ?? 0})</div>
                     <div>Validation pass: {Math.round(Number(candidate.stats?.validation_pass_rate || 0) * 100)}% ({candidate.stats?.validation_seen ?? 0})</div>
+                    <div>Expected: {candidate.expected_decision || "approve"}</div>
+                    <div>Bucket: {candidate.diversity_bucket || "n/a"}</div>
                   </div>
+                  {candidate.auto_candidate_reason ? <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">{candidate.auto_candidate_reason}</div> : null}
 
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
@@ -920,7 +1197,7 @@ export default function ProjectDetailPage() {
         <div className="card space-y-4">
           <div>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Workflow configuration</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Live settings for import, routing, AI suggestions, and review quality control.</p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Live settings and reporting change by task type.</p>
           </div>
           <div className="space-y-2 text-sm text-gray-700 dark:text-gray-300">
             <div>Labels: {projectQuery.data.label_schema.map((item) => item.name).join(", ") || "—"}</div>
@@ -931,10 +1208,11 @@ export default function ProjectDetailPage() {
                 {sourceSync.errors.length ? `, errors ${sourceSync.errors.join("; ")}` : ""}
               </div>
             ) : null}
-            <div>Frame interval: {projectQuery.data.frame_interval_sec}s</div>
-            <div>Annotators per frame: {projectQuery.data.assignments_per_task}</div>
-            <div>Agreement threshold: {projectQuery.data.agreement_threshold}</div>
-            <div>IoU threshold: {projectQuery.data.iou_threshold}</div>
+            {isIntervalProject ? <div>Intervals total: {Number(overviewAny?.intervals?.total || 0)}</div> : <div>Frame interval: {projectQuery.data.frame_interval_sec}s</div>}
+            {isIntervalProject ? <div>Approved intervals: {Number(overviewAny?.intervals?.approved || 0)}</div> : <div>Annotators per task: {projectQuery.data.assignments_per_task}</div>}
+            {isIntervalProject ? <div>Validation assigned: {Number(overviewAny?.intervals?.validation_assigned || 0)}</div> : <div>Agreement threshold: {projectQuery.data.agreement_threshold}</div>}
+            {isIntervalProject ? <div>Validation submitted: {Number(overviewAny?.intervals?.validation_submitted || 0)}</div> : <div>IoU threshold: {projectQuery.data.iou_threshold}</div>}
+            {isIntervalProject ? <div>Agreement: {String(overviewAny?.intervals?.average_validation_agreement ?? 0)}</div> : null}
             <div>Assignment scope: {String(projectQuery.data.participant_rules?.assignment_scope || "selected_only")}</div>
             <div>AI pre-labeling: {projectQuery.data.participant_rules?.ai_prelabel_enabled === false ? "disabled" : "enabled"}</div>
             <div>AI model: {String(projectQuery.data.participant_rules?.ai_model || "baseline-box-v1")}</div>
@@ -944,8 +1222,8 @@ export default function ProjectDetailPage() {
             <div>Task batch size: {String(projectQuery.data.participant_rules?.task_batch_size ?? 10)}</div>
             <div>Min consecutive frames: {String(projectQuery.data.participant_rules?.min_sequence_size ?? 3)}</div>
             <div>Annotator pool size: {projectQuery.data.allowed_annotator_ids.length}</div>
-            <div>Workflow batches created: {String(overview?.work_items?.workflow_batches_total ?? 0)}</div>
-            <div>Validation-ready frames: {String(overview?.work_items?.validation_ready_items ?? 0)}</div>
+            {isBBoxProject ? <div>Workflow batches created: {String(overview?.work_items?.workflow_batches_total ?? 0)}</div> : null}
+            {isBBoxProject ? <div>Validation-ready frames: {String(overview?.work_items?.validation_ready_items ?? 0)}</div> : null}
           </div>
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
             <div className="font-medium text-gray-900 dark:text-white">Instructions</div>
@@ -953,7 +1231,7 @@ export default function ProjectDetailPage() {
             {projectQuery.data.instructions_file_uri ? (
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white p-3 text-xs dark:border-gray-800 dark:bg-gray-950">
                 <div className="text-gray-600 dark:text-gray-400">
-                  Файл: <a className="text-blue-600 hover:underline dark:text-blue-400" href={projectQuery.data.instructions_file_uri} target="_blank" rel="noreferrer">{projectQuery.data.instructions_file_name || "instruction"}</a>
+                  Файл: <Link className="text-blue-600 hover:underline dark:text-blue-400" to={`/projects/${projectId}/instructions`}>{projectQuery.data.instructions_file_name || "instruction"}</Link>
                 </div>
                 <div className="text-gray-500 dark:text-gray-400">
                   v{projectQuery.data.instructions_version ?? 0}{projectQuery.data.instructions_updated_at ? ` · ${new Date(projectQuery.data.instructions_updated_at).toLocaleString()}` : ""}
@@ -962,10 +1240,10 @@ export default function ProjectDetailPage() {
             ) : null}
             {(user?.role === "customer" || user?.role === "admin") ? (
               <div className="mt-3 space-y-2">
-                <div className="text-xs font-medium text-gray-700 dark:text-gray-300">Загрузить файл инструкции (PDF/DOCX/MD/TXT)</div>
+                <div className="text-xs font-medium text-gray-700 dark:text-gray-300">Загрузить файл инструкции (HTML/PDF/DOCX/MD/TXT)</div>
                 <input
                   type="file"
-                  accept=".pdf,.docx,.md,.txt"
+                  accept=".html,.htm,.pdf,.docx,.md,.txt"
                   onChange={(event) => setInstructionFile((event.target.files?.[0] as File | undefined) ?? null)}
                   className="block w-full text-sm text-gray-600 dark:text-gray-300"
                 />
@@ -1026,7 +1304,7 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="hidden">
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Security / audit events</h2>
           {securityEventsQuery.isFetching ? <span className="text-sm text-gray-500">Refreshing…</span> : null}

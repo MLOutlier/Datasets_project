@@ -85,12 +85,20 @@ function qualityLabel(strategy?: string) {
   return labels[String(strategy || "")] || "контроль качества";
 }
 
+function formatDate(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString();
+}
+
 export default function CreateProjectPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const [taskType, setTaskType] = useState<ProjectTaskType>("bbox_annotation");
   const [widgetType, setWidgetType] = useState<ProjectWidgetType>("bbox");
   const [sourceProjectId, setSourceProjectId] = useState("");
+  const [sourceSearch, setSourceSearch] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
@@ -101,11 +109,24 @@ export default function CreateProjectPage() {
   const [specialization, setSpecialization] = useState("");
   const [groupRule, setGroupRule] = useState("");
   const [selectedAnnotators, setSelectedAnnotators] = useState<string[]>([]);
+  const [participantSearch, setParticipantSearch] = useState("");
+  const [participantSpecializationFilter, setParticipantSpecializationFilter] = useState("");
+  const [participantGroupFilter, setParticipantGroupFilter] = useState("");
+  const [participantImportFile, setParticipantImportFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const annotatorsQuery = useQuery({ queryKey: ["participants", "annotator"], queryFn: () => participantsAPI.list("annotator") });
-  const sourceProjectsQuery = useQuery({ queryKey: ["projects", "source-options"], queryFn: () => projectsAPI.list({ limit: 100 }) });
+  const annotatorsQuery = useQuery({
+    queryKey: ["participants", "annotator", participantSearch, participantSpecializationFilter, participantGroupFilter],
+    queryFn: () => participantsAPI.list({
+      role: "annotator",
+      search: participantSearch || undefined,
+      specialization: participantSpecializationFilter || undefined,
+      group: participantGroupFilter || undefined,
+      limit: 500,
+    }),
+  });
+  const sourceProjectsQuery = useQuery({ queryKey: ["projects", "source-options", taskType], queryFn: () => projectsAPI.sourceOptions(taskType) });
   const registryQuery = useQuery({ queryKey: ["projects", "task-registry"], queryFn: () => projectsAPI.taskRegistry() });
 
   const taskSpecs = registryQuery.data?.task_types ?? [];
@@ -113,8 +134,26 @@ export default function CreateProjectPage() {
   const needsLabels = Boolean(taskConfig?.ui_hints?.needs_labels);
   const needsSource = Boolean(taskConfig?.requires_source_project);
   const labelsPreview = useMemo(() => parseLabels(labelsInput), [labelsInput]);
-  const sourceTaskType = String(taskConfig?.ui_hints?.source_task_type || "");
-  const sourceProjects = (sourceProjectsQuery.data?.items ?? []).filter((project) => !sourceTaskType || project.task_type === sourceTaskType);
+  const sourceProjects = sourceProjectsQuery.data?.items ?? [];
+  const filteredSourceProjects = useMemo(() => {
+    const needle = sourceSearch.trim().toLowerCase();
+    if (!needle) return sourceProjects;
+    return sourceProjects.filter((project) => {
+      const haystack = `${project.title} ${project.task_type} ${project.status} ${project.ready_count}`.toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [sourceProjects, sourceSearch]);
+  const selectedSourceProject = sourceProjects.find((project) => project.id === sourceProjectId);
+  const canUseSourceProject = needsSource || sourceProjects.length > 0 || Boolean(taskConfig?.source_task_types?.length);
+  const annotators = annotatorsQuery.data?.items ?? [];
+  const specializationOptions = useMemo(
+    () => Array.from(new Set(annotators.map((item) => item.specialization || "").filter(Boolean))).sort(),
+    [annotators],
+  );
+  const groupOptions = useMemo(
+    () => Array.from(new Set(annotators.flatMap((item) => [...(item.groups || []), item.group_name || ""]).filter(Boolean))).sort(),
+    [annotators],
+  );
 
   useEffect(() => {
     if (!registryQuery.data) return;
@@ -135,10 +174,24 @@ export default function CreateProjectPage() {
     setTaskType(next);
     setWidgetType(nextSpec?.default_widget ?? "bbox");
     setSourceProjectId("");
+    setSourceSearch("");
   };
 
   const toggleAnnotator = (id: string) => {
     setSelectedAnnotators((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+  };
+
+  const selectFilteredAnnotators = () => {
+    setSelectedAnnotators((current) => Array.from(new Set([...current, ...annotators.map((item) => item.id)])));
+  };
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
 
   const canSubmit = Boolean(taskConfig && title && (!needsLabels || labelsPreview.length > 0) && (!needsSource || sourceProjectId));
@@ -166,7 +219,7 @@ export default function CreateProjectPage() {
         source_project_id: sourceProjectId || null,
         source_config: {
           use_final_annotation: true,
-          interval_statuses: ["draft", "approved"],
+          interval_statuses: taskType === "bbox_annotation" ? ["approved"] : ["draft", "approved"],
           materializer: taskConfig.materializer,
         },
         instructions,
@@ -184,6 +237,10 @@ export default function CreateProjectPage() {
         agreement_threshold: Number(agreementThreshold) || 0.75,
         iou_threshold: 0.5,
       });
+      if (participantImportFile) {
+        const credentials = await projectsAPI.importParticipantsCsv(project.id, participantImportFile);
+        downloadBlob(credentials, `project-${project.id}-participant-credentials.csv`);
+      }
       navigate(`/projects/${project.id}`);
     } catch (err: any) {
       setError(err.response?.data?.detail || err.response?.data?.source_project_id || err.response?.data?.widget_type || err.response?.data?.error || "Не удалось создать проект");
@@ -269,17 +326,83 @@ export default function CreateProjectPage() {
                 </select>
               </div>
 
-              {needsSource ? (
+              {canUseSourceProject ? (
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Проект-источник</label>
-                  <select className="input-field" value={sourceProjectId} onChange={(event) => setSourceProjectId(event.target.value)} required>
-                    <option value="">Выберите проект-источник</option>
+                  <select className="sr-only" value={sourceProjectId} onChange={(event) => setSourceProjectId(event.target.value)} required={needsSource} tabIndex={-1}>
+                    <option value="">{needsSource ? "Выберите проект-источник" : "Без проекта-источника"}</option>
                     {sourceProjects.map((project) => (
                       <option key={project.id} value={project.id}>
-                        {project.title} ({project.task_type})
+                        {project.title} ({project.task_type}, готово: {project.ready_count})
                       </option>
                     ))}
                   </select>
+                  <div className="space-y-3">
+                    <input
+                      className="input-field"
+                      value={sourceSearch}
+                      onChange={(event) => setSourceSearch(event.target.value)}
+                      placeholder="Поиск по названию, типу или статусу"
+                    />
+                    <div className="max-h-72 space-y-2 overflow-auto rounded-lg border border-gray-200 p-2 dark:border-gray-800">
+                      {!needsSource ? (
+                        <button
+                          type="button"
+                          className={`w-full rounded-lg border p-3 text-left text-sm transition ${!sourceProjectId ? "border-blue-500 bg-blue-50 dark:bg-blue-950" : "border-gray-200 bg-white hover:border-gray-300 dark:border-gray-800 dark:bg-gray-950"}`}
+                          onClick={() => setSourceProjectId("")}
+                        >
+                          <div className="font-medium text-gray-900 dark:text-white">Без проекта-источника</div>
+                          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Данные будут добавлены после создания проекта.</div>
+                        </button>
+                      ) : null}
+                      {filteredSourceProjects.map((project) => {
+                        const active = sourceProjectId === project.id;
+                        return (
+                          <button
+                            key={project.id}
+                            type="button"
+                            className={`w-full rounded-lg border p-3 text-left text-sm transition ${active ? "border-blue-500 bg-blue-50 dark:bg-blue-950" : "border-gray-200 bg-white hover:border-gray-300 dark:border-gray-800 dark:bg-gray-950"}`}
+                            onClick={() => setSourceProjectId(project.id)}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate font-medium text-gray-900 dark:text-white">{project.title}</div>
+                                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                  {project.task_type} · {project.status} · готово: {project.ready_count}
+                                </div>
+                              </div>
+                              <span className={`rounded-full px-2 py-0.5 text-xs ${project.ready ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-200" : "bg-gray-100 text-gray-600 dark:bg-gray-900 dark:text-gray-300"}`}>
+                                {project.ready ? "Готов" : "Не готов"}
+                              </span>
+                            </div>
+                            {formatDate(project.updated_at || project.created_at) ? <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">Обновлен: {formatDate(project.updated_at || project.created_at)}</div> : null}
+                          </button>
+                        );
+                      })}
+                      {filteredSourceProjects.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">
+                          {sourceProjects.length ? "По этому запросу ничего не найдено." : "Совместимых проектов-источников пока нет."}
+                        </div>
+                      ) : null}
+                    </div>
+                    {selectedSourceProject ? (
+                      <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
+                        Выбран источник: {selectedSourceProject.title}
+                        <button type="button" className="ml-2 font-medium underline" onClick={() => setSourceProjectId("")}>
+                          сбросить
+                        </button>
+                      </div>
+                    ) : needsSource ? (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+                        Для этого типа проекта нужно выбрать совместимый источник.
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    {sourceProjects.length
+                      ? "Можно продолжить цепочку из результата предыдущего проекта. Sync создаст задания из готового результата источника."
+                      : "Совместимых проектов-источников пока нет."}
+                  </div>
                 </div>
               ) : (
                 <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
@@ -327,7 +450,70 @@ export default function CreateProjectPage() {
             </div>
             <div>
               <div className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">Пул исполнителей</div>
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+              <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-sm font-medium text-gray-900 dark:text-white">Import participants from CSV</div>
+                <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">Columns: email, username or name, role, specialization, group or groups.</div>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  className="mt-3 block w-full text-sm text-gray-600 dark:text-gray-300"
+                  onChange={(event) => setParticipantImportFile((event.target.files?.[0] as File | undefined) ?? null)}
+                />
+                {participantImportFile ? <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">{participantImportFile.name}</div> : null}
+              </div>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm font-medium text-gray-700 dark:text-gray-300">Executor table</div>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="btn-secondary" onClick={selectFilteredAnnotators}>Select filtered</button>
+                  <button type="button" className="btn-secondary" onClick={() => setSelectedAnnotators([])}>Clear</button>
+                </div>
+              </div>
+              <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                <input className="input-field" value={participantSearch} onChange={(event) => setParticipantSearch(event.target.value)} placeholder="Search name or email" />
+                <select className="input-field" value={participantSpecializationFilter} onChange={(event) => setParticipantSpecializationFilter(event.target.value)}>
+                  <option value="">All specializations</option>
+                  {specializationOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+                <select className="input-field" value={participantGroupFilter} onChange={(event) => setParticipantGroupFilter(event.target.value)}>
+                  <option value="">All groups</option>
+                  {groupOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-800">
+                <table className="table min-w-full text-sm">
+                  <thead>
+                    <tr>
+                      <th className="py-2 pr-3 text-left">Select</th>
+                      <th className="py-2 pr-3 text-left">User</th>
+                      <th className="py-2 pr-3 text-left">Specialization</th>
+                      <th className="py-2 pr-3 text-left">Groups</th>
+                      <th className="py-2 pr-3 text-left">Rating</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {annotators.map((participant: Participant) => {
+                      const active = selectedAnnotators.includes(participant.id);
+                      const groups = [...(participant.groups || []), participant.group_name || ""].filter(Boolean);
+                      return (
+                        <tr key={participant.id} className="border-t border-gray-100 dark:border-gray-800">
+                          <td className="py-2 pr-3"><input type="checkbox" checked={active} onChange={() => toggleAnnotator(participant.id)} /></td>
+                          <td className="py-2 pr-3">
+                            <div className="font-medium text-gray-900 dark:text-white">{participant.username}</div>
+                            <div className="text-xs text-gray-500">{participant.email}</div>
+                          </td>
+                          <td className="py-2 pr-3">{participant.specialization || "-"}</td>
+                          <td className="py-2 pr-3">{Array.from(new Set(groups)).join(", ") || "-"}</td>
+                          <td className="py-2 pr-3">{participant.rating?.toFixed(2) ?? "0.00"}</td>
+                        </tr>
+                      );
+                    })}
+                    {annotators.length === 0 ? (
+                      <tr><td className="py-4 text-gray-500" colSpan={5}>No executors found.</td></tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+              <div className="hidden">
                 {(annotatorsQuery.data?.items ?? []).map((participant: Participant) => {
                   const active = selectedAnnotators.includes(participant.id);
                   return (

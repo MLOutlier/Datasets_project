@@ -15,6 +15,7 @@ import { FinancePage } from "./pages/FinancePage";
 import { ProfilePage } from "./pages/ProfilePage";
 import CreateProjectPage from "./pages/CreateProjectPage";
 import ProjectDetailPage from "./pages/ProjectDetailPage";
+import ProjectInstructionsPage from "./pages/ProjectInstructionsPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import GenericLabelingPage from "./pages/GenericLabelingPage";
 
@@ -71,6 +72,16 @@ export default function App() {
           <RequireAuth>
             <Layout>
               <ProjectDetailPage />
+            </Layout>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/projects/:projectId/instructions"
+        element={
+          <RequireAuth>
+            <Layout>
+              <ProjectInstructionsPage />
             </Layout>
           </RequireAuth>
         }
