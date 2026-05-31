@@ -124,6 +124,32 @@ class ProjectTaskMaterializer:
                 summary=summary,
             )
 
+        if self.task_type == TASK_BBOX_VALIDATION:
+            from apps.cv_annotation.services.workflow import create_bbox_validation_items_for_import
+
+            summary = create_bbox_validation_items_for_import(import_session)
+            return MaterializationResult(
+                task_type=self.task_type,
+                action="validation_upload_to_bbox_validation_items",
+                created=int(summary.get("work_items_created") or 0),
+                skipped=int(summary.get("work_items_skipped") or 0),
+                errors=tuple(summary.get("errors") or ()),
+                summary=summary,
+            )
+
+        if self.task_type == TASK_VIDEO_INTERVAL_VALIDATION:
+            from apps.cv_annotation.services.workflow import create_interval_validation_items_for_import
+
+            summary = create_interval_validation_items_for_import(import_session)
+            return MaterializationResult(
+                task_type=self.task_type,
+                action="validation_upload_to_interval_validation_items",
+                created=int(summary.get("intervals_created") or 0),
+                skipped=int(summary.get("intervals_skipped") or 0),
+                errors=tuple(summary.get("errors") or ()),
+                summary=summary,
+            )
+
         summary = {
             "work_items_created": 0,
             "assignments_created": 0,

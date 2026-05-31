@@ -100,7 +100,7 @@ export default function ProjectsPage() {
           <div>
             <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Projects</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-              {user?.role === "annotator" ? "Assigned annotation projects" : user?.role === "reviewer" ? "Projects for review" : "Create and monitor dataset projects"}
+              {user?.role === "annotator" ? "Assigned annotation projects" : "Create and monitor dataset projects"}
             </p>
           </div>
           {canCreate ? (
@@ -130,21 +130,21 @@ export default function ProjectsPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Total</div>
-          <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-white">{totals.all}</div>
+        <div className="flex min-h-[86px] flex-col justify-center rounded-lg border border-gray-200 bg-white px-5 py-4 dark:border-gray-800 dark:bg-gray-950">
+          <div className="whitespace-nowrap text-sm leading-5 text-gray-500 dark:text-gray-400">Total</div>
+          <div className="mt-2 text-2xl font-semibold leading-none text-gray-900 dark:text-white">{totals.all}</div>
         </div>
-        <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Active on page</div>
-          <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-white">{totals.active}</div>
+        <div className="flex min-h-[86px] flex-col justify-center rounded-lg border border-gray-200 bg-white px-5 py-4 dark:border-gray-800 dark:bg-gray-950">
+          <div className="whitespace-nowrap text-sm leading-5 text-gray-500 dark:text-gray-400">Active on page</div>
+          <div className="mt-2 text-2xl font-semibold leading-none text-gray-900 dark:text-white">{totals.active}</div>
         </div>
-        <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-sm text-gray-500 dark:text-gray-400">CV on page</div>
-          <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-white">{totals.cv}</div>
+        <div className="flex min-h-[86px] flex-col justify-center rounded-lg border border-gray-200 bg-white px-5 py-4 dark:border-gray-800 dark:bg-gray-950">
+          <div className="whitespace-nowrap text-sm leading-5 text-gray-500 dark:text-gray-400">CV on page</div>
+          <div className="mt-2 text-2xl font-semibold leading-none text-gray-900 dark:text-white">{totals.cv}</div>
         </div>
-        <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-sm text-gray-500 dark:text-gray-400">Closed on page</div>
-          <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-white">{totals.closed}</div>
+        <div className="flex min-h-[86px] flex-col justify-center rounded-lg border border-gray-200 bg-white px-5 py-4 dark:border-gray-800 dark:bg-gray-950">
+          <div className="whitespace-nowrap text-sm leading-5 text-gray-500 dark:text-gray-400">Closed on page</div>
+          <div className="mt-2 text-2xl font-semibold leading-none text-gray-900 dark:text-white">{totals.closed}</div>
         </div>
       </div>
 
@@ -194,7 +194,9 @@ export default function ProjectsPage() {
                       <div className="text-xs text-gray-500 dark:text-gray-400">{project.annotation_type} / {project.widget_type}</div>
                     </td>
                     <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{project.label_schema.length}</td>
-                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{project.assignments_per_task}</td>
+                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
+                      {project.available_executor_count ?? project.allowed_annotator_count ?? project.allowed_annotator_ids?.length ?? 0}
+                    </td>
                     <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{formatDate(project.updated_at)}</td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-2">
@@ -216,9 +218,9 @@ export default function ProjectsPage() {
               </tbody>
             </table>
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-200 px-4 py-3 text-sm text-gray-600 dark:border-gray-800 dark:text-gray-300">
-            <div>Showing {pageStart}-{pageEnd} of {total}</div>
-            <div className="flex gap-2">
+          <div className="flex min-h-[68px] flex-wrap items-center justify-between gap-3 border-t border-gray-200 px-4 py-3 text-sm text-gray-600 dark:border-gray-800 dark:text-gray-300">
+            <div className="min-w-0 shrink break-words">Showing {pageStart}-{pageEnd} of {total}</div>
+            <div className="flex shrink-0 gap-2">
               <button type="button" className="btn-secondary" disabled={offset === 0 || projectsQuery.isFetching} onClick={() => setOffset((current) => Math.max(0, current - PAGE_SIZE))}>
                 Previous
               </button>

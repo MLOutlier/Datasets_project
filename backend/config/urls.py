@@ -16,7 +16,7 @@ from apps.projects.views import ProjectViewSet, TaskViewSet
 from apps.labeling.views import AnnotationViewSet
 from apps.quality.views import ReviewViewSet, MetricsViewSet
 from apps.finance.views import TransactionViewSet, PaymentViewSet
-from apps.core.views import HealthCheckView, MongoDBCheckView, RedisCheckView
+from apps.core.views import HealthCheckView, MongoDBCheckView, ReadinessCheckView, RedisCheckView
 from apps.quality.views_dawid_skene import project_dawid_skene_view
 from apps.quality.views_iou import check_iou_view
 
@@ -40,6 +40,7 @@ urlpatterns = [
         path("health/", HealthCheckView.as_view(), name="health-check"),
         path("health/mongodb/", MongoDBCheckView.as_view(), name="health-mongodb"),
         path("health/redis/", RedisCheckView.as_view(), name="health-redis"),
+        path("ready/", ReadinessCheckView.as_view(), name="readiness-check"),
 
         # Пользователь (текущий)
         path("users/me/", me_view, name="user-me"),

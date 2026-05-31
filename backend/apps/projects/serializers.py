@@ -10,7 +10,9 @@ from ..users.models import User
 from .models import Project, ProjectMembership, Task
 from .services.instructions import instruction_bundle
 from .task_registry import (
+    TASK_BBOX_VALIDATION,
     TASK_TYPE_CHOICES,
+    TASK_VIDEO_INTERVAL_VALIDATION,
     WIDGET_TYPE_CHOICES,
     annotation_type_for_task,
     default_widget_for_task,
@@ -19,6 +21,45 @@ from .task_registry import (
     source_task_types_for_task,
     task_requires_source_project,
 )
+
+QUALITY_PRESETS = {
+    "standard": {
+        "assignments_per_task": 2,
+        "agreement_threshold": 0.75,
+        "iou_threshold": 0.5,
+        "golden_min_score": 0.8,
+        "interval_validators_per_item": 2,
+        "bbox_validators_per_batch": 2,
+        "annotation_golden_interval": 9,
+        "bbox_golden_items_per_batch": 10,
+        "description": "Balanced speed, cost, and quality.",
+    },
+    "high_accuracy": {
+        "assignments_per_task": 3,
+        "agreement_threshold": 0.85,
+        "iou_threshold": 0.6,
+        "golden_min_score": 0.9,
+        "interval_validators_per_item": 3,
+        "bbox_validators_per_batch": 3,
+        "annotation_golden_interval": 6,
+        "bbox_golden_items_per_batch": 12,
+        "description": "More independent answers and stricter control checks.",
+    },
+    "fast": {
+        "assignments_per_task": 1,
+        "agreement_threshold": 0.65,
+        "iou_threshold": 0.45,
+        "golden_min_score": 0.75,
+        "interval_validators_per_item": 1,
+        "bbox_validators_per_batch": 1,
+        "annotation_golden_interval": 12,
+        "bbox_golden_items_per_batch": 6,
+        "description": "Lower latency and cost with lighter agreement requirements.",
+    },
+}
+
+VALIDATION_UPLOAD_MODE = "upload"
+VALIDATION_SOURCE_MODE = "source_project"
 
 
 class ProjectSerializer(serializers.Serializer):
@@ -164,6 +205,42 @@ class ProjectSerializer(serializers.Serializer):
 
         return normalized
 
+    def _normalize_participant_rules(self, attrs: Dict[str, Any], task_type: str) -> Dict[str, Any]:
+        initial_data = getattr(self, "initial_data", {}) or {}
+        explicit_rules = initial_data.get("participant_rules")
+        rules = dict(attrs.get("participant_rules") or {})
+        quality_level = str(rules.get("quality_level") or "standard").strip()
+        if quality_level not in QUALITY_PRESETS:
+            quality_level = "standard"
+        rules["quality_level"] = quality_level
+        preset = QUALITY_PRESETS[quality_level]
+
+        for field in ("assignments_per_task", "agreement_threshold", "iou_threshold"):
+            if field not in initial_data and attrs.get(field) in (None, ""):
+                attrs[field] = preset[field]
+            elif field not in initial_data and explicit_rules is not None and "quality_level" in rules:
+                attrs[field] = preset[field]
+
+        for key in (
+            "golden_min_score",
+            "interval_validators_per_item",
+            "bbox_validators_per_batch",
+            "annotation_golden_interval",
+            "bbox_golden_items_per_batch",
+        ):
+            if key not in rules:
+                rules[key] = preset[key]
+
+        if task_type in {TASK_VIDEO_INTERVAL_VALIDATION, TASK_BBOX_VALIDATION}:
+            input_mode = str(rules.get("validation_input_mode") or VALIDATION_SOURCE_MODE).strip()
+            rules["validation_input_mode"] = VALIDATION_UPLOAD_MODE if input_mode in {VALIDATION_UPLOAD_MODE, "validation_upload"} else VALIDATION_SOURCE_MODE
+        elif "validation_input_mode" not in rules:
+            rules["validation_input_mode"] = VALIDATION_SOURCE_MODE
+
+        rules["quality_preset_description"] = preset["description"]
+        attrs["participant_rules"] = rules
+        return rules
+
     def validate(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
         request = self.context.get("request")
         user = getattr(request, "user", None)
@@ -177,6 +254,7 @@ class ProjectSerializer(serializers.Serializer):
 
         attrs["annotation_type"] = annotation_type_for_task(task_type)
         attrs["project_type"] = Project.TYPE_CV if attrs["annotation_type"] == Project.ANNOTATION_BBOX else Project.TYPE_STANDARD
+        participant_rules = self._normalize_participant_rules(attrs, task_type)
 
         source_project_id = attrs.pop("source_project_id", None)
         source_project = None
@@ -192,9 +270,14 @@ class ProjectSerializer(serializers.Serializer):
             if not is_source_task_allowed(task_type, source_task_type):
                 allowed = ", ".join(source_task_types_for_task(task_type)) or "none"
                 raise serializers.ValidationError({"source_project_id": f"Source project type '{source_task_type}' is not compatible with '{task_type}'. Allowed: {allowed}."})
-        if task_requires_source_project(task_type) and not source_project:
+        validation_upload = (
+            task_type in {TASK_VIDEO_INTERVAL_VALIDATION, TASK_BBOX_VALIDATION}
+            and participant_rules.get("validation_input_mode") == VALIDATION_UPLOAD_MODE
+        )
+        if task_requires_source_project(task_type) and not source_project and not validation_upload:
             raise serializers.ValidationError({"source_project_id": "This task type requires a source project."})
         attrs["_source_project"] = source_project
+        attrs["_clear_source_project"] = bool(validation_upload and not source_project_id)
         return attrs
 
     def _resolve_users(self, ids: List[str], role: str) -> List[User]:
@@ -218,6 +301,7 @@ class ProjectSerializer(serializers.Serializer):
         annotator_ids = validated_data.pop("allowed_annotator_ids", [])
         reviewer_ids = validated_data.pop("allowed_reviewer_ids", [])
         source_project = validated_data.pop("_source_project", None)
+        validated_data.pop("_clear_source_project", None)
 
         annotators = self._resolve_users(annotator_ids, User.ROLE_ANNOTATOR)
         reviewers = self._resolve_users(reviewer_ids, User.ROLE_REVIEWER)
@@ -232,6 +316,7 @@ class ProjectSerializer(serializers.Serializer):
         annotator_ids = validated_data.pop("allowed_annotator_ids", None)
         reviewer_ids = validated_data.pop("allowed_reviewer_ids", None)
         source_project = validated_data.pop("_source_project", None)
+        clear_source_project = bool(validated_data.pop("_clear_source_project", False))
 
         for field in (
             "title",
@@ -252,7 +337,9 @@ class ProjectSerializer(serializers.Serializer):
         ):
             if field in validated_data:
                 setattr(instance, field, validated_data[field])
-        if "source_project_id" in getattr(self, "initial_data", {}) or source_project is not None:
+        if clear_source_project:
+            instance.source_project = None
+        elif "source_project_id" in getattr(self, "initial_data", {}) or source_project is not None:
             instance.source_project = source_project
 
         annotators = instance.allowed_annotators
@@ -296,6 +383,13 @@ class ProjectSerializer(serializers.Serializer):
 
     def to_representation(self, instance: Project) -> Dict[str, Any]:
         annotator_count = len(instance.allowed_annotators or [])
+        reviewer_count = len(instance.allowed_reviewers or [])
+        active_annotator_count = ProjectMembership.objects(
+            project=instance,
+            role=ProjectMembership.ROLE_ANNOTATOR,
+            is_active=True,
+        ).count()
+        available_executor_count = int(active_annotator_count or annotator_count)
         recommended_min = 5
         minimum_full_cycle = 3
         workflow_warnings = []
@@ -325,9 +419,15 @@ class ProjectSerializer(serializers.Serializer):
             "instructions_updated_at": getattr(instance, "instructions_updated_at", None),
             "instructions_bundle": instruction_bundle(instance, self.context.get("request").user if self.context.get("request") else None),
             "label_schema": instance.label_schema or [],
-            "participant_rules": instance.participant_rules or {},
+            "participant_rules": {
+                **(instance.participant_rules or {}),
+                "quality_presets": QUALITY_PRESETS,
+            },
             "allowed_annotator_ids": [str(user.id) for user in instance.allowed_annotators or []],
             "allowed_reviewer_ids": [str(user.id) for user in instance.allowed_reviewers or []],
+            "allowed_annotator_count": annotator_count,
+            "allowed_reviewer_count": reviewer_count,
+            "available_executor_count": available_executor_count,
             "frame_interval_sec": instance.frame_interval_sec,
             "assignments_per_task": instance.assignments_per_task,
             "agreement_threshold": instance.agreement_threshold,

@@ -24,6 +24,7 @@ from apps.cv_annotation.services.workflow import (
     compare_bbox_annotations,
     ensure_interval_validation_assignments,
     materialize_bbox_annotation_interval_source,
+    materialize_bbox_validation_source,
     materialize_interval_validation_source,
     maybe_create_hidden_golden_assignment,
     submit_bbox_validation_assignment,
@@ -32,9 +33,11 @@ from apps.cv_annotation.services.workflow import (
 )
 from apps.projects.task_registry import (
     TASK_BBOX_ANNOTATION,
+    TASK_BBOX_VALIDATION,
     TASK_VIDEO_ANNOTATION,
     TASK_VIDEO_INTERVAL_VALIDATION,
     WIDGET_BBOX,
+    WIDGET_BBOX_VALIDATION,
     WIDGET_INTERVAL_VALIDATION,
     WIDGET_VIDEO_INTERVALS,
     source_task_types_for_task,
@@ -470,6 +473,85 @@ class TestGoldenDatasetWorkflow:
         assert retire_response.status_code == 200
         assert retire_response.data["status"] == GoldenFrame.STATUS_RETIRED
 
+    def test_golden_source_frames_include_local_project_frames(self, client, auth_headers, user_customer):
+        project = make_cv_project(user_customer)
+        frame = make_cv_frame(project, user_customer)
+
+        response = client.get(f"/api/projects/{project.id}/golden-source-frames/", **auth_headers)
+
+        assert response.status_code == 200
+        assert response.data["total"] == 1
+        assert response.data["items"][0]["frame_id"] == str(frame.id)
+        assert response.data["items"][0]["golden_status"] == "none"
+
+    def test_golden_source_frames_include_bbox_work_item_source_frames(self, client, auth_headers, user_customer, user_annotator):
+        source_project = make_cv_project(user_customer)
+        source_frame = make_cv_frame(source_project, user_customer)
+        bbox_project = Project(
+            owner=user_customer,
+            title="BBox from source frame",
+            project_type=Project.TYPE_CV,
+            annotation_type=Project.ANNOTATION_BBOX,
+            task_type=TASK_BBOX_ANNOTATION,
+            widget_type=WIDGET_BBOX,
+            source_project=source_project,
+            allowed_annotators=[user_annotator],
+            assignments_per_task=1,
+        ).save()
+        work_item = WorkItem(
+            project=bbox_project,
+            frame=source_frame,
+            status=WorkItem.STATUS_PENDING,
+            workflow_meta={"source_project_id": str(source_project.id), "source_frame_id": str(source_frame.id)},
+        ).save()
+
+        response = client.get(f"/api/projects/{bbox_project.id}/golden-source-frames/", **auth_headers)
+
+        assert response.status_code == 200
+        assert response.data["total"] == 1
+        assert response.data["items"][0]["frame_id"] == str(source_frame.id)
+        assert WorkItem.objects(id=work_item.id).first() is not None
+
+    def test_golden_source_frames_include_bbox_validation_items_with_final_annotation(self, client, auth_headers, user_customer, user_annotator):
+        source_project = Project(
+            owner=user_customer,
+            title="BBox annotation source",
+            project_type=Project.TYPE_CV,
+            annotation_type=Project.ANNOTATION_BBOX,
+            task_type=TASK_BBOX_ANNOTATION,
+            widget_type=WIDGET_BBOX,
+            allowed_annotators=[user_annotator],
+            assignments_per_task=1,
+        ).save()
+        source_frame = make_cv_frame(source_project, user_customer)
+        reference = {"boxes": [{"x": 10, "y": 10, "width": 20, "height": 20, "label": "drone"}]}
+        WorkItem(
+            project=source_project,
+            frame=source_frame,
+            status=WorkItem.STATUS_COMPLETED,
+            final_annotation=reference,
+            validation_status=WorkItem.VALIDATION_APPROVED,
+        ).save()
+        validation_project = Project(
+            owner=user_customer,
+            title="BBox validation",
+            project_type=Project.TYPE_CV,
+            annotation_type=Project.ANNOTATION_BBOX,
+            task_type=TASK_BBOX_VALIDATION,
+            widget_type=WIDGET_BBOX_VALIDATION,
+            source_project=source_project,
+            allowed_annotators=[user_annotator],
+            assignments_per_task=1,
+        ).save()
+
+        assert materialize_bbox_validation_source(validation_project) == 1
+        response = client.get(f"/api/projects/{validation_project.id}/golden-source-frames/", **auth_headers)
+
+        assert response.status_code == 200
+        assert response.data["total"] == 1
+        assert response.data["items"][0]["frame_id"] == str(source_frame.id)
+        assert response.data["items"][0]["reference_annotation"] == reference
+
     def test_customer_can_create_manual_positive_and_negative_golden_cases(self, client, auth_headers, user_customer):
         project = make_cv_project(user_customer)
         frame = make_cv_frame(project, user_customer)
@@ -479,7 +561,7 @@ class TestGoldenDatasetWorkflow:
         positive_response = client.post(
             f"/api/projects/{project.id}/golden-candidates/",
             {
-                "frame_id": str(frame_negative.id),
+                "frame_id": str(frame.id),
                 "case_type": "positive",
                 "status": "active",
                 "reference_annotation": reference,
@@ -509,6 +591,46 @@ class TestGoldenDatasetWorkflow:
         assert negative_response.data["case_type"] == "negative"
         assert negative_response.data["expected_decision"] == "needs_changes"
         assert negative_response.data["issue_type"] == "bad_geometry"
+
+    def test_customer_can_create_golden_case_from_source_frame_without_removing_work_item(self, client, auth_headers, user_customer, user_annotator):
+        source_project = make_cv_project(user_customer)
+        source_frame = make_cv_frame(source_project, user_customer)
+        bbox_project = Project(
+            owner=user_customer,
+            title="BBox current project",
+            project_type=Project.TYPE_CV,
+            annotation_type=Project.ANNOTATION_BBOX,
+            task_type=TASK_BBOX_ANNOTATION,
+            widget_type=WIDGET_BBOX,
+            source_project=source_project,
+            allowed_annotators=[user_annotator],
+            assignments_per_task=1,
+        ).save()
+        work_item = WorkItem(
+            project=bbox_project,
+            frame=source_frame,
+            status=WorkItem.STATUS_PENDING,
+            workflow_meta={"source_project_id": str(source_project.id), "source_frame_id": str(source_frame.id)},
+        ).save()
+        reference = {"boxes": [{"x": 10, "y": 10, "width": 20, "height": 20, "label": "drone"}]}
+
+        response = client.post(
+            f"/api/projects/{bbox_project.id}/golden-candidates/",
+            {
+                "frame_id": str(source_frame.id),
+                "case_type": "positive",
+                "status": "active",
+                "reference_annotation": reference,
+            },
+            **auth_headers,
+            format="json",
+        )
+
+        assert response.status_code == 201
+        assert response.data["frame_id"] == str(source_frame.id)
+        assert GoldenFrame.objects(project=bbox_project, frame=source_frame).count() == 1
+        work_item.reload()
+        assert work_item.status == WorkItem.STATUS_PENDING
 
     def test_manual_golden_create_upserts_existing_frame(self, client, auth_headers, user_customer):
         project = make_cv_project(user_customer)

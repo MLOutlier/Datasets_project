@@ -1,4 +1,4 @@
-export type Role = "customer" | "annotator" | "reviewer" | "admin";
+export type Role = "customer" | "annotator" | "admin";
 
 export interface User {
   id: string;
@@ -258,6 +258,8 @@ export interface ProjectParticipantRules {
   specialization?: string;
   group?: string;
   assignment_scope?: "all" | "specialists" | "group_only" | "selected_only";
+  quality_level?: "standard" | "high_accuracy" | "fast";
+  validation_input_mode?: "source_project" | "upload";
   stage_pools?: Record<string, string[]>;
   ai_prelabel_enabled?: boolean;
   ai_model?: string;
@@ -278,6 +280,7 @@ export interface ProjectParticipantRules {
   annotation_golden_interval?: number;
   interval_review_padding_sec?: number;
   stuck_assignment_ttl_minutes?: number;
+  quality_presets?: Record<string, Record<string, unknown>>;
 }
 
 export interface VideoInterval {
@@ -405,6 +408,9 @@ export interface Project {
   participant_rules: ProjectParticipantRules;
   allowed_annotator_ids: string[];
   allowed_reviewer_ids: string[];
+  allowed_annotator_count?: number;
+  allowed_reviewer_count?: number;
+  available_executor_count?: number;
   frame_interval_sec: number;
   assignments_per_task: number;
   agreement_threshold: number;
@@ -456,6 +462,12 @@ export interface ProjectImportResponse {
     ffmpeg?: {
       available: boolean;
       message: string;
+    };
+    validation_annotations?: {
+      items_total: number;
+      boxes_total: number;
+      intervals_total: number;
+      errors: string[];
     };
   };
 }

@@ -112,6 +112,7 @@ class ProjectMembership(Document):
     specialization = StringField(default="", max_length=255)
     group_name = StringField(default="", max_length=255)
     groups = ListField(StringField(max_length=100), default=list)
+    metadata = DictField(default=dict)
     is_active = BooleanField(default=True)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)

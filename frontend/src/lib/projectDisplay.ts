@@ -14,8 +14,15 @@ export const STATUS_LABELS: Record<string, string> = {
   open: "Open",
   paused: "Paused",
   closed: "Closed",
+  review: "Validation",
   candidate: "Candidate",
   retired: "Retired",
+};
+
+export const ROLE_LABELS: Record<string, string> = {
+  customer: "Customer",
+  annotator: "Annotator",
+  admin: "Admin",
 };
 
 export function taskTypeLabel(value?: string | null) {
@@ -26,4 +33,9 @@ export function taskTypeLabel(value?: string | null) {
 export function statusLabel(value?: string | null) {
   const key = String(value || "");
   return STATUS_LABELS[key] || key.replace(/_/g, " ") || "Unknown";
+}
+
+export function roleLabel(value?: string | null) {
+  const key = String(value || "");
+  return ROLE_LABELS[key] || "User";
 }

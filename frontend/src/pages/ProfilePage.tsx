@@ -209,7 +209,7 @@ export function ProfilePage() {
               <StatCard icon="✅" value={stats?.completed_tasks ?? 0} label="Выполнено задач" gradient="from-blue-400 to-indigo-500" bgClass="bg-blue-100 dark:bg-blue-900/30" />
               <StatCard icon="📝" value={stats?.total_annotations ?? 0} label="Всего аннотаций" gradient="from-emerald-400 to-green-500" bgClass="bg-emerald-100 dark:bg-emerald-900/30" />
               <StatCard icon="🎯" value={`${((stats?.average_f1 ?? 0) * 100).toFixed(1)}%`} label="Средняя точность (F1)" gradient="from-violet-400 to-purple-500" bgClass="bg-violet-100 dark:bg-violet-900/30" />
-              <StatCard icon="🔍" value={stats?.reviews_count ?? 0} label="Проверок качества" gradient="from-amber-400 to-orange-500" bgClass="bg-amber-100 dark:bg-amber-900/30" />
+              <StatCard icon="🔍" value={stats?.reviews_count ?? 0} label="Quality checks" gradient="from-amber-400 to-orange-500" bgClass="bg-amber-100 dark:bg-amber-900/30" />
             </div>
           )}
         </>

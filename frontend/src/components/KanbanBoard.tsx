@@ -1,18 +1,12 @@
-/**
- * Kanban-доска для управления задачами
- * - Drag-n-Drop между колонками
- * - Статистика по колонкам
- */
-
 import React from "react";
 import { Task, TaskStatus } from "../types";
 
 const STATUS_CONFIG: Record<TaskStatus, { label: string; icon: string; color: string }> = {
-  pending: { label: "Ожидает", icon: "📝", color: "bg-gray-500" },
-  in_progress: { label: "В работе", icon: "⏳", color: "bg-yellow-500" },
-  review: { label: "На проверке", icon: "👀", color: "bg-blue-500" },
-  completed: { label: "Завершено", icon: "✅", color: "bg-green-500" },
-  rejected: { label: "Отклонено", icon: "❌", color: "bg-red-500" },
+  pending: { label: "Pending", icon: "P", color: "bg-gray-500" },
+  in_progress: { label: "In progress", icon: "W", color: "bg-yellow-500" },
+  review: { label: "Validation", icon: "V", color: "bg-blue-500" },
+  completed: { label: "Completed", icon: "C", color: "bg-green-500" },
+  rejected: { label: "Rejected", icon: "R", color: "bg-red-500" },
 };
 
 const STATUSES: TaskStatus[] = ["pending", "in_progress", "review", "completed", "rejected"];
@@ -20,9 +14,9 @@ const STATUSES: TaskStatus[] = ["pending", "in_progress", "review", "completed",
 function TaskCard({ task, onDragStart }: { task: Task; onDragStart: (id: string) => void }) {
   const [isDragging, setIsDragging] = React.useState(false);
 
-  const handleDragStart = (e: React.DragEvent) => {
-    e.dataTransfer.setData("text/plain", task.id);
-    e.dataTransfer.effectAllowed = "move";
+  const handleDragStart = (event: React.DragEvent) => {
+    event.dataTransfer.setData("text/plain", task.id);
+    event.dataTransfer.effectAllowed = "move";
     setIsDragging(true);
     onDragStart(task.id);
   };
@@ -34,23 +28,21 @@ function TaskCard({ task, onDragStart }: { task: Task; onDragStart: (id: string)
       draggable
       onDragStart={handleDragStart}
       onDragEnd={() => setIsDragging(false)}
-      className={`group cursor-grab active:cursor-grabbing rounded-lg bg-white dark:bg-gray-900 p-3 shadow-sm border border-gray-200 dark:border-gray-700 hover:shadow-md transition-all duration-200 ${isDragging ? "opacity-50 scale-95" : "opacity-100"}`}
+      className={`group cursor-grab rounded-lg border border-gray-200 bg-white p-3 shadow-sm transition-all duration-200 active:cursor-grabbing dark:border-gray-700 dark:bg-gray-900 ${isDragging ? "scale-95 opacity-50" : "opacity-100 hover:shadow-md"}`}
     >
-      <div className="mb-2">
-        <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100 line-clamp-2">
-          {task.title || `Задача #${task.id.slice(0, 6)}`}
-        </h4>
-      </div>
-      <div className="flex items-center justify-between mb-2">
-        <code className="text-[10px] font-mono text-gray-500 bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">{task.id.slice(0, 8)}...</code>
+      <h4 className="mb-2 line-clamp-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
+        {task.title || `Task #${task.id.slice(0, 6)}`}
+      </h4>
+      <div className="mb-2 flex items-center justify-between">
+        <code className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500 dark:bg-gray-800">{task.id.slice(0, 8)}...</code>
         <span className={`text-[10px] font-medium ${difficultyColor}`}>{(task.difficulty_score * 100).toFixed(0)}%</span>
       </div>
-      <div className="text-[11px] text-gray-500 mb-0.5">Датасет</div>
-      <code className="text-xs font-mono text-gray-700 dark:text-gray-300 bg-primary-50 dark:bg-primary-900/20 px-1.5 py-0.5 rounded block truncate">
+      <div className="mb-0.5 text-[11px] text-gray-500">Dataset</div>
+      <code className="block truncate rounded bg-primary-50 px-1.5 py-0.5 font-mono text-xs text-gray-700 dark:bg-primary-900/20 dark:text-gray-300">
         {task.dataset_id.slice(0, 12)}...
       </code>
-      <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-gray-800 mt-2">
-        <span className="text-[10px] text-gray-400">{task.created_at ? new Date(task.created_at).toLocaleDateString("ru-RU") : "—"}</span>
+      <div className="mt-2 flex items-center justify-between border-t border-gray-100 pt-2 dark:border-gray-800">
+        <span className="text-[10px] text-gray-400">{task.created_at ? new Date(task.created_at).toLocaleDateString() : "-"}</span>
       </div>
     </div>
   );
@@ -73,24 +65,30 @@ function KanbanColumn({
 
   return (
     <div
-      className={`flex flex-col rounded-xl bg-gray-100 dark:bg-gray-800/50 transition-all duration-200 ${isDragOver ? "ring-2 ring-primary-500 ring-offset-2" : ""}`}
-      onDragOver={(e) => { e.preventDefault(); onDragOver(status); }}
-      onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); if (id) onDropTask(id, status); }}
+      className={`flex flex-col rounded-xl bg-gray-100 transition-all duration-200 dark:bg-gray-800/50 ${isDragOver ? "ring-2 ring-primary-500 ring-offset-2" : ""}`}
+      onDragOver={(event) => {
+        event.preventDefault();
+        onDragOver(status);
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        const id = event.dataTransfer.getData("text/plain");
+        if (id) onDropTask(id, status);
+      }}
     >
-      <div className="sticky top-0 flex items-center justify-between gap-2 rounded-t-xl bg-gray-200 dark:bg-gray-800 px-3 py-2 border-b border-gray-300 dark:border-gray-700">
+      <div className="sticky top-0 flex items-center justify-between gap-2 rounded-t-xl border-b border-gray-300 bg-gray-200 px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
         <div className="flex items-center gap-2">
-          <span className="text-lg">{config.icon}</span>
+          <span className={`flex h-6 w-6 items-center justify-center rounded text-xs font-semibold text-white ${config.color}`}>{config.icon}</span>
           <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">{config.label}</span>
         </div>
-        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white dark:bg-gray-700 text-xs font-bold text-gray-700 dark:text-gray-300 shadow-sm">
+        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white text-xs font-bold text-gray-700 shadow-sm dark:bg-gray-700 dark:text-gray-300">
           {tasks.length}
         </span>
       </div>
-      <div className="flex-1 space-y-2 p-2 overflow-y-auto min-h-[200px]">
+      <div className="min-h-[200px] flex-1 space-y-2 overflow-y-auto p-2">
         {tasks.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 text-gray-500 border-2 border-dashed border-gray-300 rounded-lg">
-            <span className="text-2xl mb-2">📭</span>
-            <span className="text-xs">Нет задач</span>
+          <div className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-300 py-8 text-gray-500">
+            <span className="text-xs">No tasks</span>
           </div>
         ) : (
           tasks.map((task) => <TaskCard key={task.id} task={task} onDragStart={() => {}} />)
@@ -110,7 +108,7 @@ export function KanbanBoard({ tasks, onStatusChange }: { tasks: Task[]; onStatus
   }, [tasks]);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-5 min-h-[calc(100vh-12rem)]">
+    <div className="grid min-h-[calc(100vh-12rem)] gap-4 lg:grid-cols-5">
       {STATUSES.map((status) => (
         <KanbanColumn
           key={status}

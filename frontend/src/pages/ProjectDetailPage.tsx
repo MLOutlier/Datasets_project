@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
-import { projectsAPI, workflowAPI, dawidSkeneAPI } from "../services/api";
+import { projectsAPI, workflowAPI } from "../services/api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { useAuthStore } from "../store";
 import { getTaskFlowCopy, getTaskGroupLabel } from "../lib/taskFlowCopy";
@@ -11,142 +11,48 @@ import type { GoldenSourceFrame, ProjectExportArtifact, ProjectExportArtifactNam
 const EMPTY_GOLDEN_BOX = { x: 0, y: 0, width: 100, height: 100, label: "drone" };
 type GoldenBox = { x: number; y: number; width: number; height: number; label: string };
 
-function DawidSkeneQuality({ projectId }: { projectId: string }) {
-  const qualityQuery = useQuery({
-    queryKey: ["dawid-skene-quality", projectId],
-    queryFn: () => dawidSkeneAPI.getProjectQuality(projectId),
-    enabled: !!projectId,
-  });
+type ReadinessItem = { label: string; ready: boolean; detail?: string };
 
-  if (qualityQuery.isLoading) return <LoadingSpinner />;
-  if (qualityQuery.isError || !qualityQuery.data) {
-    return (
-      <div className="card">
-        <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-          Annotator quality (Dawid-Skene)
-        </h2>
-        <p className="mt-2 text-sm text-gray-500">
-          Quality metrics will appear after cross-check reviews are created.
-        </p>
-      </div>
-    );
-  }
+function StatusDot({ ready }: { ready: boolean }) {
+  return <span className={`mt-1 h-2.5 w-2.5 rounded-full ${ready ? "bg-emerald-500" : "bg-gray-300 dark:bg-gray-700"}`} />;
+}
 
-  const { annotators } = qualityQuery.data;
-
+function ProductReadinessChecklist({ items }: { items: ReadinessItem[] }) {
+  const readyCount = items.filter((item) => item.ready).length;
   return (
-    <div className="card">
-      <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-        Annotator quality (Dawid-Skene)
-      </h2>
-      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-        EM-based probabilistic model. Accuracy and confusion matrix computed
-        from cross-check consensus.
-      </p>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        {annotators.map((a) => (
-          <div
-            key={a.user_id}
-            className="rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950"
-          >
-            <div className="flex items-center justify-between">
-              <div className="font-semibold text-gray-900 dark:text-white">
-                {a.username}
-              </div>
-              <div
-                className={`text-sm font-bold ${
-                  a.accuracy >= 0.7
-                    ? "text-green-600"
-                    : a.accuracy >= 0.5
-                    ? "text-yellow-600"
-                    : "text-red-600"
-                }`}
-              >
-                Acc: {(a.accuracy * 100).toFixed(0)}%
-              </div>
+    <div className="card space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Project readiness</h2>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+            Minimum setup needed before executors can work without manual support.
+          </p>
+        </div>
+        <div className="rounded bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700 dark:bg-gray-900 dark:text-gray-200">
+          {readyCount}/{items.length} ready
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {items.map((item) => (
+          <div key={item.label} className="flex gap-3 rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+            <StatusDot ready={item.ready} />
+            <div>
+              <div className="text-sm font-medium text-gray-900 dark:text-white">{item.label}</div>
+              {item.detail ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{item.detail}</div> : null}
             </div>
-
-            <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-              <div className="rounded bg-white p-2 dark:bg-gray-900">
-                <div className="text-gray-500">F1-score</div>
-                <div className="font-bold text-gray-900 dark:text-white">
-                  {a.f1?.toFixed(3) ?? "—"}
-                </div>
-              </div>
-              <div className="rounded bg-white p-2 dark:bg-gray-900">
-                <div className="text-gray-500">Error rate</div>
-                <div className="font-bold text-gray-900 dark:text-white">
-                  {(a.error_rate * 100).toFixed(1)}%
-                </div>
-              </div>
-              <div className="rounded bg-white p-2 dark:bg-gray-900">
-                <div className="text-gray-500">Rating</div>
-                <div className="font-bold text-gray-900 dark:text-white">
-                  {a.rating?.toFixed(2) ?? "—"}
-                </div>
-              </div>
-            </div>
-
-            {a.confusion_matrix && Object.keys(a.confusion_matrix).length > 0 ? (
-              <div className="mt-3">
-                <div className="mb-1 text-xs font-medium text-gray-700 dark:text-gray-300">
-                  Confusion matrix (true → predicted):
-                </div>
-                <table className="w-full text-[11px]">
-                  <thead>
-                    <tr>
-                      <th className="text-left text-gray-500">True ↓ Pred →</th>
-                      {Object.keys(Object.values(a.confusion_matrix)[0] || {}).map((label) => (
-                        <th key={label} className="text-center text-gray-500">
-                          {label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.entries(a.confusion_matrix).map(([trueLabel, row]) => (
-                      <tr key={trueLabel}>
-                        <td className="font-medium text-gray-700 dark:text-gray-300">
-                          {trueLabel}
-                        </td>
-                        {Object.entries(row).map(([predLabel, prob]) => (
-                          <td
-                            key={predLabel}
-                            className={`text-center font-mono ${
-                              trueLabel === predLabel
-                                ? Number(prob) >= 0.7
-                                  ? "text-green-600"
-                                  : "text-yellow-600"
-                                : Number(prob) > 0.3
-                                ? "text-red-600"
-                                : "text-gray-400"
-                            }`}
-                          >
-                            {((prob as number) * 100).toFixed(0)}%
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-
-            {a.rating_history && a.rating_history.length > 0 ? (
-              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                Last {a.rating_history.length} tasks:{" "}
-                {a.rating_history.slice(0, 3).map((h, i) => (
-                  <span key={i} className="ml-1">
-                    {h.rating_delta >= 0 ? "↑" : "↓"}
-                    {Math.abs(h.rating_delta).toFixed(2)}
-                  </span>
-                ))}
-              </div>
-            ) : null}
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function QualityMetricCard({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
+  return (
+    <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-800">
+      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-white">{value}</div>
+      {hint ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{hint}</div> : null}
     </div>
   );
 }
@@ -157,6 +63,7 @@ export default function ProjectDetailPage() {
   const queryClient = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
+  const [validationAnnotationFile, setValidationAnnotationFile] = useState<File | null>(null);
   const [activeImportId, setActiveImportId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [exportPayload, setExportPayload] = useState<string | null>(null);
@@ -214,8 +121,9 @@ export default function ProjectDetailPage() {
       }
       let currentImportId = activeImportId;
       let latest = null;
-      for (const file of uploadQueue) {
-        latest = await workflowAPI.upload(projectId, file, currentImportId);
+      for (let index = 0; index < uploadQueue.length; index += 1) {
+        const file = uploadQueue[index];
+        latest = await workflowAPI.upload(projectId, file, currentImportId, index === 0 ? validationAnnotationFile : null);
         currentImportId = latest.import_id;
       }
       return latest;
@@ -225,6 +133,7 @@ export default function ProjectDetailPage() {
         setActiveImportId(result.import_id);
       }
       setUploadQueue([]);
+      setValidationAnnotationFile(null);
       setUploadError(result?.asset_status === "failed" ? result.error_message || "Video was uploaded, but processing failed." : null);
       queryClient.invalidateQueries({ queryKey: ["project-overview", projectId] });
     },
@@ -469,7 +378,9 @@ export default function ProjectDetailPage() {
   const isIntervalProject = taskType.includes("interval");
   const isBBoxProject = taskType.includes("bbox");
   const isValidationTask = ["video_interval_validation", "bbox_validation"].includes(taskType);
-  const canUploadMedia = ["bbox_annotation", "video_annotation", "image_annotation"].includes(taskType);
+  const validationInputMode = String(projectQuery.data?.participant_rules?.validation_input_mode || "source_project");
+  const isValidationUpload = isValidationTask && validationInputMode === "upload";
+  const canUploadMedia = ["bbox_annotation", "video_annotation", "image_annotation"].includes(taskType) || isValidationUpload;
   const lastUploadPreview = uploadMutation.data?.preview;
   const readyImportId = activeImportId || String(overview?.imports?.latest_ready_import_id || "");
   const hasVideoAssets = Array.isArray(overview?.imports?.video_asset_ids) && overview.imports.video_asset_ids.length > 0;
@@ -523,21 +434,67 @@ export default function ProjectDetailPage() {
   const activePositiveGolden = activeGolden.filter((item) => (item.case_type || "positive") === "positive").length;
   const activeNegativeGolden = activeGolden.filter((item) => item.case_type === "negative").length;
   const diversityBucketCount = new Set(activeGolden.map((item) => item.diversity_bucket || `${item.asset_id || ""}:${Math.floor(Number(item.timestamp_sec || 0) / 30)}`)).size;
-  const goldenNeedsReview = goldenActiveCount === 0 && goldenCandidateCount > 0;
+  const goldenNeedsActivation = goldenActiveCount === 0 && goldenCandidateCount > 0;
   const goldenBalanceWarning = goldenActiveCount > 0 && activeNegativeGolden === 0;
   const bboxValidationAssigned = Number(overviewAny?.bbox_validation?.assigned || 0);
   const canDeleteProject = user?.role === "admin" || (user?.role === "customer" && projectQuery.data?.owner_id === user.id);
+  const headerActionClass = "btn-secondary inline-flex min-h-[48px] items-center justify-center whitespace-nowrap";
   const sourceSync = overview?.source_sync;
   const fallbackReadinessGates = [
-    { label: "Импорт готов", ready: Number(overview?.imports?.ready || 0) > 0 || Number(overview?.imports?.finalized || 0) > 0 },
-    { label: "Интервалы размечаются", ready: Number(overviewAny?.intervals?.total || 0) > 0 || Number(overviewAny?.intervals?.validation_assigned || 0) > 0 },
-    { label: "Интервалы валидируются", ready: Number(overviewAny?.intervals?.validation_assigned || 0) > 0 || Number(overviewAny?.intervals?.approved || 0) > 0 },
-    { label: "BBox-разметка доступна", ready: Number(overview?.work_items?.total || 0) > 0 },
-    { label: "BBox-валидация идет", ready: Number(overviewAny?.bbox_validation?.assigned || 0) > 0 || Number((overview?.work_items as any)?.validation_pending || 0) > 0 },
-    { label: "Экспорт доступен", ready: exportReady },
+    { label: "Import ready", ready: Number(overview?.imports?.ready || 0) > 0 || Number(overview?.imports?.finalized || 0) > 0 },
+    { label: "Intervals assigned", ready: Number(overviewAny?.intervals?.total || 0) > 0 || Number(overviewAny?.intervals?.validation_assigned || 0) > 0 },
+    { label: "Intervals validated", ready: Number(overviewAny?.intervals?.validation_assigned || 0) > 0 || Number(overviewAny?.intervals?.approved || 0) > 0 },
+    { label: "BBox annotation available", ready: Number(overview?.work_items?.total || 0) > 0 },
+    { label: "BBox validation running", ready: Number(overviewAny?.bbox_validation?.assigned || 0) > 0 || Number((overview?.work_items as any)?.validation_pending || 0) > 0 },
+    { label: "Export available", ready: exportReady },
   ];
   const readinessGates = overview?.readiness_gates?.length ? overview.readiness_gates : fallbackReadinessGates;
   const nextAction = overview?.next_action;
+  const requeuedItems = Number(overview?.assignments?.disputed || overviewAny?.work_items?.requeued || validationDisputedItems || 0);
+  const validationReadyItems = Number(overviewAny?.work_items?.validation_ready_items || overviewAny?.work_items?.validation_ready || 0);
+  const goldenStats = goldenCandidates.reduce(
+    (acc, item) => {
+      acc.seen += Number(item.stats?.annotation_seen || 0) + Number(item.stats?.validation_seen || 0);
+      acc.passed += Number(item.stats?.annotation_passed || 0) + Number(item.stats?.validation_passed || 0);
+      return acc;
+    },
+    { seen: 0, passed: 0 },
+  );
+  const goldenAccuracy = goldenStats.seen > 0 ? Math.round((goldenStats.passed / goldenStats.seen) * 100) : null;
+  const consensusRate = totalWorkItems > 0 ? Math.round((completedWorkItems / totalWorkItems) * 100) : 0;
+  const requeueRate = exportTotalItems > 0 ? Math.round((requeuedItems / exportTotalItems) * 100) : 0;
+  const projectReadinessItems: ReadinessItem[] = [
+    {
+      label: "Label schema",
+      ready: !isBBoxProject || (projectQuery.data?.label_schema.length || 0) > 0,
+      detail: `${projectQuery.data?.label_schema.length || 0} labels`,
+    },
+    {
+      label: "Instructions",
+      ready: Boolean(projectQuery.data?.instructions?.trim() || projectQuery.data?.instructions_file_uri),
+      detail: projectQuery.data?.instructions_file_uri ? "File attached" : "Text instructions",
+    },
+    {
+      label: "Executor pool",
+      ready: (projectQuery.data?.allowed_annotator_ids.length || 0) > 0 || projectQuery.data?.participant_rules?.assignment_scope === "all",
+      detail: `${projectQuery.data?.allowed_annotator_ids.length || 0} selected executors`,
+    },
+    {
+      label: "Imported data",
+      ready: Number(overview?.imports?.frames_total || 0) > 0 || totalWorkItems > 0 || genericTotal > 0,
+      detail: `${Number(overview?.imports?.frames_total || 0)} frames detected`,
+    },
+    {
+      label: "Golden controls",
+      ready: projectQuery.data?.project_type !== "cv" || goldenActiveCount > 0,
+      detail: `${goldenActiveCount} active, ${goldenCandidateCount} candidates`,
+    },
+    {
+      label: "Workflow settings",
+      ready: Number(projectQuery.data?.assignments_per_task || 0) > 0 && Number(projectQuery.data?.agreement_threshold || 0) > 0,
+      detail: `${projectQuery.data?.assignments_per_task || 0} answers per item`,
+    },
+  ];
 
   const completion = useMemo(() => {
     if (isGenericTask) return genericTotal > 0 ? Math.round((genericCompleted / genericTotal) * 100) : 0;
@@ -589,29 +546,29 @@ export default function ProjectDetailPage() {
           <h1 className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">{projectQuery.data.title}</h1>
           <p className="mt-3 max-w-3xl text-sm text-gray-600 dark:text-gray-400">{projectQuery.data.description}</p>
         </div>
-        <div className="flex items-center gap-3">
-          <Link to={`/projects/${projectId}/workflow`} className="btn-secondary">
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <Link to={`/projects/${projectId}/workflow`} className={headerActionClass}>
             Настройка разметки
           </Link>
           {["video_annotation", "video_interval_validation"].includes(taskType) ? (
-            <Link to={`/projects/${projectId}/intervals`} className="btn-secondary">
+            <Link to={`/projects/${projectId}/intervals`} className={headerActionClass}>
               Интервалы
             </Link>
           ) : null}
           {projectQuery.data.project_type === "cv" ? (
-            <Link to={`/projects/${projectId}/golden`} className="btn-secondary">
+            <Link to={`/projects/${projectId}/golden`} className={headerActionClass}>
               Golden dataset
             </Link>
           ) : null}
-          <button className="btn-secondary" onClick={() => syncWorkflowMutation.mutate()} disabled={syncWorkflowMutation.isPending}>
+          <button className={headerActionClass} onClick={() => syncWorkflowMutation.mutate()} disabled={syncWorkflowMutation.isPending}>
             {syncWorkflowMutation.isPending ? "Синхронизируем..." : "Синхронизировать"}
           </button>
-          <button className="btn-secondary" onClick={() => pauseProjectMutation.mutate()} disabled={pauseProjectMutation.isPending}>
+          <button className={headerActionClass} onClick={() => pauseProjectMutation.mutate()} disabled={pauseProjectMutation.isPending}>
             {projectQuery.data.status === "paused" ? "Resume project" : "Pause project"}
           </button>
           {canDeleteProject ? (
             <button
-              className="btn-secondary border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950"
+              className={`${headerActionClass} border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950`}
               onClick={() => {
                 if (window.confirm("Удалить проект и все связанные задания/разметки? Это действие нельзя отменить.")) {
                   deleteProjectMutation.mutate();
@@ -669,7 +626,7 @@ export default function ProjectDetailPage() {
               </p>
             </div>
             <div className="text-sm text-gray-500 dark:text-gray-400">
-              Всего: {Number(genericTasksQuery.data?.summary?.total || 0)} · Ожидают: {Number(genericTasksQuery.data?.summary?.pending || 0)} · На проверке: {Number(genericTasksQuery.data?.summary?.review || 0)}
+              Total: {Number(genericTasksQuery.data?.summary?.total || 0)} · Pending: {Number(genericTasksQuery.data?.summary?.pending || 0)} · Validation: {Number(genericTasksQuery.data?.summary?.review || 0)}
             </div>
           </div>
           <textarea
@@ -728,10 +685,38 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
+      <ProductReadinessChecklist items={projectReadinessItems} />
+
       <div className="card space-y-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Результаты проекта</h2>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Quality dashboard</h2>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+              Quality is based on consensus, IoU, golden controls, validation batches, and requeue signals.
+            </p>
+          </div>
+          <Link to={`/projects/${projectId}/golden`} className="btn-secondary">
+            Manage golden
+          </Link>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+          <QualityMetricCard label="Consensus rate" value={`${consensusRate}%`} hint={`${completedWorkItems}/${totalWorkItems} work items completed`} />
+          <QualityMetricCard label="Golden accuracy" value={goldenAccuracy === null ? "No attempts" : `${goldenAccuracy}%`} hint={`${goldenStats.seen} control attempts`} />
+          <QualityMetricCard label="Requeue rate" value={`${requeueRate}%`} hint={`${requeuedItems} items returned to execution`} />
+          <QualityMetricCard label="Validation-ready" value={validationReadyItems} hint={`${bboxValidationAssigned} validation batches assigned`} />
+          <QualityMetricCard label="Exportable" value={`${approvedExportItems}/${exportTotalItems}`} hint={`${exportBlockedItems} blocked or not ready`} />
+        </div>
+        {(insufficientAnnotatorItems > 0 || insufficientValidatorItems > 0) ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+            Capacity warning: {insufficientAnnotatorItems} items need more executors and {insufficientValidatorItems} items need more validators.
+          </div>
+        ) : null}
+      </div>
+
+      <div className="card space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Project results</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
               Каждый проект экспортирует собственный результат. Только проверенный датасет считается финальной выгрузкой для обучения модели.
             </p>
@@ -790,7 +775,7 @@ export default function ProjectDetailPage() {
                     disabled={exportMutation.isPending}
                     onClick={() => previewArtifact(artifact)}
                   >
-                    {exportMutation.isPending ? "Готовим..." : `Preview ${effectiveFormat}`}
+              {exportMutation.isPending ? "Preparing..." : `Preview ${effectiveFormat}`}
                   </button>
                   <button
                     type="button"
@@ -904,7 +889,7 @@ export default function ProjectDetailPage() {
             <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{goldenActiveCount ? "Активен" : "Bootstrap"}</div>
           </div>
         </div>
-        {goldenNeedsReview ? (
+        {goldenNeedsActivation ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
             Golden dataset еще не активен: система нашла {goldenCandidateCount} кандидатов с высоким согласием. Примите подходящие кейсы, чтобы включить скрытый контроль.
           </div>
@@ -1104,7 +1089,7 @@ export default function ProjectDetailPage() {
                       className="btn-secondary"
                       disabled={promoteGoldenMutation.isPending || candidate.status === "active"}
                       onClick={() => {
-                        const notes = window.prompt("Review notes for promotion", candidate.review_notes || "");
+                        const notes = window.prompt("Notes for promotion", candidate.review_notes || "");
                         if (notes === null) return;
                         promoteGoldenMutation.mutate({ goldenFrameId: candidate.golden_frame_id, reviewNotes: notes });
                       }}
@@ -1135,7 +1120,7 @@ export default function ProjectDetailPage() {
         )}
       </div>
 
-      {isValidationTask ? (
+      {isValidationTask && !isValidationUpload ? (
         <div className="card space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -1171,7 +1156,7 @@ export default function ProjectDetailPage() {
       ) : null}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr,0.8fr]">
-        {!isValidationTask ? <div className="card space-y-4">
+        {canUploadMedia ? <div className="card space-y-4">
           <div>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">{taskCopy.importTitle}</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
@@ -1186,6 +1171,20 @@ export default function ProjectDetailPage() {
             disabled={!canUploadMedia}
             className="block w-full text-sm text-gray-600 dark:text-gray-300"
           />
+          {isValidationUpload ? (
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Annotation file for validation</label>
+              <input
+                type="file"
+                accept=".json,.csv,application/json,text/csv"
+                onChange={(event) => setValidationAnnotationFile(event.target.files?.[0] ?? null)}
+                className="block w-full text-sm text-gray-600 dark:text-gray-300"
+              />
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Upload JSON or CSV with file_name/frame_uri and boxes; finalize will create validation tasks from these annotations.
+              </div>
+            </div>
+          ) : null}
           {uploadQueue.length > 0 ? (
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
               {uploadQueue.map((file) => (
@@ -1197,7 +1196,7 @@ export default function ProjectDetailPage() {
             </div>
           ) : null}
           <div className="flex flex-wrap gap-3">
-            <button className="btn-primary" type="button" onClick={() => uploadMutation.mutate()} disabled={!canUploadMedia || uploadMutation.isPending || uploadQueue.length === 0}>
+            <button className="btn-primary" type="button" onClick={() => uploadMutation.mutate()} disabled={!canUploadMedia || uploadMutation.isPending || uploadQueue.length === 0 || (isValidationUpload && !validationAnnotationFile && !readyImportId)}>
               {uploadMutation.isPending ? "Uploading..." : "Upload to preview"}
             </button>
             <button className="btn-secondary" type="button" onClick={() => finalizeMutation.mutate()} disabled={!canUploadMedia || !readyImportId || finalizeMutation.isPending}>
@@ -1205,12 +1204,14 @@ export default function ProjectDetailPage() {
             </button>
           </div>
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
-            {hasVideoAssets
+              {hasVideoAssets
               ? "Для видео первый этап стартует сразу после успешной загрузки: выбранные исполнители получают задачи на интервалы. Finalize import нужен позже для image-only импортов или ручной догенерации bbox-задач по уже утвержденным интервалам."
               : taskType === "image_annotation"
-                ? "Для image annotation нажмите Finalize import после preview, чтобы создать legacy Task-задания по загруженным изображениям."
-                : canUploadMedia
-                  ? "Для изображений нажмите Finalize import после preview, чтобы создать bbox-задачи для выбранных исполнителей."
+                  ? "For image annotation, run Finalize import after preview to create legacy image tasks."
+                  : isValidationUpload
+                    ? "For validation upload, upload media together with the annotation file, preview the parsed annotations, then finalize to create validation tasks."
+                  : canUploadMedia
+                  ? "For images, run Finalize import after preview to create bbox work items for selected annotators."
                   : "Для этого типа проекта импорт медиа не используется."}
           </div>
           {uploadError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{uploadError}</div> : null}
@@ -1223,6 +1224,11 @@ export default function ProjectDetailPage() {
               {lastUploadPreview.cleanup ? (
                 <div className="mt-2">
                   Cleanup: duplicates removed {lastUploadPreview.cleanup.duplicates_removed ?? 0}, invalid frames removed {lastUploadPreview.cleanup.invalid_frames_removed ?? 0}
+                </div>
+              ) : null}
+              {lastUploadPreview.validation_annotations ? (
+                <div className="mt-2">
+                  Validation annotations: {lastUploadPreview.validation_annotations.items_total} items, {lastUploadPreview.validation_annotations.boxes_total} boxes, {lastUploadPreview.validation_annotations.intervals_total} intervals
                 </div>
               ) : null}
               {lastUploadPreview.ffmpeg ? (
@@ -1259,7 +1265,7 @@ export default function ProjectDetailPage() {
             <div>AI model: {String(projectQuery.data.participant_rules?.ai_model || "baseline-box-v1")}</div>
             <div>AI confidence: {String(projectQuery.data.participant_rules?.ai_confidence_threshold ?? 0.7)}</div>
             <div>Keyframe interval: {String(projectQuery.data.participant_rules?.video_keyframe_interval ?? 1)}</div>
-            <div>Tracking: {String(projectQuery.data.participant_rules?.tracking_algorithm || "CSRT")}</div>
+            <div>Tracking setting (baseline): {String(projectQuery.data.participant_rules?.tracking_algorithm || "CSRT")}</div>
             <div>Task batch size: {String(projectQuery.data.participant_rules?.task_batch_size ?? 10)}</div>
             <div>Min consecutive frames: {String(projectQuery.data.participant_rules?.min_sequence_size ?? 3)}</div>
             <div>Annotator pool size: {projectQuery.data.allowed_annotator_ids.length}</div>
@@ -1306,8 +1312,6 @@ export default function ProjectDetailPage() {
           </div>
         </div>
       </div>
-
-      <DawidSkeneQuality projectId={projectId!} />
 
       <div className="card">
         <div className="flex items-center justify-between">

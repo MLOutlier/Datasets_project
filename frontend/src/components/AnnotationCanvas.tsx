@@ -118,8 +118,6 @@ export default function AnnotationCanvas({
 }) {
   const stageRef = useRef<any>(null);
   const contentRef = useRef<any>(null);
-  const deviceWidth = window.innerWidth
-  const deviceHeight = window.innerHeight
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(
@@ -131,8 +129,8 @@ export default function AnnotationCanvas({
   const [tool, setTool] = useState<"draw" | "pan">("draw");
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-    const [viewportWidth, setViewportWidth] = useState(deviceWidth);
-  const [viewportHeight, setViewportHeight] = useState(deviceHeight);
+  const [viewportWidth, setViewportWidth] = useState(1100);
+  const [viewportHeight, setViewportHeight] = useState(760);
   const [showHotkeys, setShowHotkeys] = useState(false);
 
   // Undo/Redo
@@ -171,16 +169,11 @@ export default function AnnotationCanvas({
   useEffect(() => {
     if (!containerRef.current) return;
     const updateSize = () => {
-      const width =
-        typeof window !== "undefined"
-          ? window.innerWidth
-          : containerRef.current?.clientWidth || 1100;
-      const height =
-        typeof window !== "undefined"
-          ? window.innerHeight - 56
-          : containerRef.current?.clientHeight || 760;
+      const rect = containerRef.current?.getBoundingClientRect();
+      const width = Math.max(320, Math.floor(rect?.width || containerRef.current?.clientWidth || 1100));
+      const height = Math.max(420, Math.floor(rect?.height || containerRef.current?.clientHeight || 760));
       setViewportWidth(width);
-      setViewportHeight(Math.max(560, height));
+      setViewportHeight(height);
     };
     updateSize();
     const observer = new ResizeObserver(updateSize);

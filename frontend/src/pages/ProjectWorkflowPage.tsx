@@ -8,6 +8,11 @@ import { useAuthStore } from "../store";
 
 const DEFAULT_LABEL_COLORS = ["#2563eb", "#16a34a", "#dc2626", "#ea580c", "#7c3aed", "#0891b2", "#ca8a04", "#4f46e5"];
 const TRACKING_ALGORITHMS = ["CSRT", "KCF", "MOSSE", "MIL", "MedianFlow", "TLD", "BOOSTING"] as const;
+const QUALITY_PRESETS = {
+  standard: { label: "Standard", hint: "Balanced speed, cost, and quality.", assignments: "2", agreement: "0.75", iou: "0.5", golden: "0.8", validators: "2", interval: "9" },
+  high_accuracy: { label: "High accuracy", hint: "More answers and stricter checks for critical datasets.", assignments: "3", agreement: "0.85", iou: "0.6", golden: "0.9", validators: "3", interval: "6" },
+  fast: { label: "Fast", hint: "Lower latency and cost with lighter quality gates.", assignments: "1", agreement: "0.65", iou: "0.45", golden: "0.75", validators: "1", interval: "12" },
+} as const;
 
 function splitLines(raw: string): string[] {
   return raw
@@ -51,6 +56,8 @@ function normalizeParticipantRules(rules?: ProjectParticipantRules): Required<Pr
     specialization: String(rules?.specialization ?? ""),
     group: String(rules?.group ?? ""),
     assignment_scope: (rules?.assignment_scope as Required<ProjectParticipantRules>["assignment_scope"]) ?? "selected_only",
+    quality_level: (rules?.quality_level as Required<ProjectParticipantRules>["quality_level"]) ?? "standard",
+    validation_input_mode: (rules?.validation_input_mode as Required<ProjectParticipantRules>["validation_input_mode"]) ?? "source_project",
     stage_pools: rules?.stage_pools ?? {},
     ai_prelabel_enabled: Boolean(rules?.ai_prelabel_enabled ?? true),
     ai_model: String(rules?.ai_model ?? "baseline-box-v1"),
@@ -71,6 +78,7 @@ function normalizeParticipantRules(rules?: ProjectParticipantRules): Required<Pr
     annotation_golden_interval: Number(rules?.annotation_golden_interval ?? 9),
     interval_review_padding_sec: Number(rules?.interval_review_padding_sec ?? 3),
     stuck_assignment_ttl_minutes: Number(rules?.stuck_assignment_ttl_minutes ?? 30),
+    quality_presets: rules?.quality_presets ?? {},
   };
 }
 
@@ -129,6 +137,13 @@ export default function ProjectWorkflowPage() {
   const [assignmentsPerTask, setAssignmentsPerTask] = useState("2");
   const [agreementThreshold, setAgreementThreshold] = useState("0.75");
   const [iouThreshold, setIouThreshold] = useState("0.5");
+  const [qualityLevel, setQualityLevel] = useState<NonNullable<ProjectParticipantRules["quality_level"]>>("standard");
+  const [validationInputMode, setValidationInputMode] = useState<NonNullable<ProjectParticipantRules["validation_input_mode"]>>("source_project");
+  const [goldenMinScore, setGoldenMinScore] = useState("0.8");
+  const [intervalValidators, setIntervalValidators] = useState("2");
+  const [bboxValidators, setBBoxValidators] = useState("2");
+  const [bboxGoldenItems, setBBoxGoldenItems] = useState("10");
+  const [annotationGoldenInterval, setAnnotationGoldenInterval] = useState("9");
   const [specialization, setSpecialization] = useState("");
   const [groupRule, setGroupRule] = useState("");
   const [assignmentScope, setAssignmentScope] = useState<Required<ProjectParticipantRules>["assignment_scope"]>("selected_only");
@@ -172,6 +187,13 @@ export default function ProjectWorkflowPage() {
     setAssignmentsPerTask(String(project.assignments_per_task ?? 2));
     setAgreementThreshold(String(project.agreement_threshold ?? 0.75));
     setIouThreshold(String(project.iou_threshold ?? 0.5));
+    setQualityLevel(rules.quality_level);
+    setValidationInputMode(rules.validation_input_mode);
+    setGoldenMinScore(String(rules.golden_min_score));
+    setIntervalValidators(String(rules.interval_validators_per_item));
+    setBBoxValidators(String(rules.bbox_validators_per_batch));
+    setBBoxGoldenItems(String(rules.bbox_golden_items_per_batch));
+    setAnnotationGoldenInterval(String(rules.annotation_golden_interval));
     setSpecialization(rules.specialization);
     setGroupRule(rules.group);
     setAssignmentScope(rules.assignment_scope);
@@ -213,6 +235,8 @@ export default function ProjectWorkflowPage() {
           specialization,
           group: groupRule,
           assignment_scope: assignmentScope,
+          quality_level: qualityLevel,
+          validation_input_mode: validationInputMode,
           stage_pools: {},
           ai_prelabel_enabled: aiEnabled,
           ai_model: aiModel.trim() || "baseline-box-v1",
@@ -221,9 +245,15 @@ export default function ProjectWorkflowPage() {
           tracking_algorithm: trackingAlgorithm,
           task_batch_size: Number(taskBatchSize) || 10,
           min_sequence_size: Number(minSequenceSize) || 3,
+          interval_annotators_per_chunk: Number(assignmentsPerTask) || 1,
+          interval_validators_per_item: Number(intervalValidators) || 2,
+          bbox_validators_per_batch: Number(bboxValidators) || 2,
+          bbox_real_items_per_batch: 20,
+          bbox_golden_items_per_batch: Number(bboxGoldenItems) || 10,
+          golden_min_score: Number(goldenMinScore) || 0.8,
           golden_candidate_threshold: 0.9,
           golden_promotion_target: 10,
-          annotation_golden_interval: 9,
+          annotation_golden_interval: Number(annotationGoldenInterval) || 9,
           interval_review_padding_sec: 3,
           stuck_assignment_ttl_minutes: 30,
         },
@@ -288,6 +318,18 @@ export default function ProjectWorkflowPage() {
 
   const toggle = (id: string, current: string[], setter: (value: string[]) => void) => {
     setter(current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
+
+  const applyQualityPreset = (level: NonNullable<ProjectParticipantRules["quality_level"]>) => {
+    const preset = QUALITY_PRESETS[level];
+    setQualityLevel(level);
+    setAssignmentsPerTask(preset.assignments);
+    setAgreementThreshold(preset.agreement);
+    setIouThreshold(preset.iou);
+    setGoldenMinScore(preset.golden);
+    setIntervalValidators(preset.validators);
+    setBBoxValidators(preset.validators);
+    setAnnotationGoldenInterval(preset.interval);
   };
 
   const addLabel = () => setLabels((current) => [...current, { name: "", color: getDefaultLabelColor(current.length) }]);
@@ -376,6 +418,49 @@ export default function ProjectWorkflowPage() {
               </div>
             </div>
 
+            <div className="rounded-lg border border-gray-200 p-4 dark:border-gray-800">
+              <div className="text-sm font-medium text-gray-900 dark:text-white">Quality preset</div>
+              <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+                {(Object.keys(QUALITY_PRESETS) as Array<keyof typeof QUALITY_PRESETS>).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => applyQualityPreset(level)}
+                    className={`rounded-lg border p-3 text-left text-sm transition ${
+                      qualityLevel === level ? "border-blue-500 bg-blue-50 text-blue-900 dark:border-blue-400 dark:bg-blue-950 dark:text-blue-100" : "border-gray-200 bg-white text-gray-700 hover:border-gray-300 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300"
+                    }`}
+                  >
+                    <div className="font-semibold">{QUALITY_PRESETS[level].label}</div>
+                    <div className="mt-1 text-xs opacity-80">{QUALITY_PRESETS[level].hint}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Golden min score</label>
+                  <input type="number" min="0" max="1" step="0.05" className="input-field" value={goldenMinScore} onChange={(e) => setGoldenMinScore(e.target.value)} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Validators</label>
+                  <input type="number" min="1" step="1" className="input-field" value={bboxValidators} onChange={(e) => setBBoxValidators(e.target.value)} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Golden interval</label>
+                  <input type="number" min="1" step="1" className="input-field" value={annotationGoldenInterval} onChange={(e) => setAnnotationGoldenInterval(e.target.value)} />
+                </div>
+              </div>
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Interval validators</label>
+                  <input type="number" min="1" step="1" className="input-field" value={intervalValidators} onChange={(e) => setIntervalValidators(e.target.value)} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Golden cases per validation batch</label>
+                  <input type="number" min="0" step="1" className="input-field" value={bboxGoldenItems} onChange={(e) => setBBoxGoldenItems(e.target.value)} />
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Agreement threshold</label>
@@ -386,6 +471,16 @@ export default function ProjectWorkflowPage() {
                 <input type="number" min="0" max="1" step="0.05" className="input-field" value={iouThreshold} onChange={(e) => setIouThreshold(e.target.value)} />
               </div>
             </div>
+
+            {projectQuery.data.task_type === "bbox_validation" || projectQuery.data.task_type === "video_interval_validation" ? (
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Validation input</label>
+                <select className="input-field" value={validationInputMode} onChange={(e) => setValidationInputMode(e.target.value as NonNullable<ProjectParticipantRules["validation_input_mode"]>)}>
+                  <option value="source_project">Source project</option>
+                  <option value="upload">Uploaded media + annotations</option>
+                </select>
+              </div>
+            ) : null}
 
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -439,7 +534,7 @@ export default function ProjectWorkflowPage() {
                   <input type="number" min="1" step="1" className="input-field" value={videoKeyframeInterval} onChange={(e) => setVideoKeyframeInterval(e.target.value)} />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Tracking algorithm</label>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Tracking setting (baseline)</label>
                   <select className="input-field" value={trackingAlgorithm} onChange={(e) => setTrackingAlgorithm(e.target.value as (typeof TRACKING_ALGORITHMS)[number])}>
                     {TRACKING_ALGORITHMS.map((algorithm) => (
                       <option key={algorithm} value={algorithm}>
@@ -447,6 +542,9 @@ export default function ProjectWorkflowPage() {
                       </option>
                     ))}
                   </select>
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Current backend uses baseline inter-frame checks; model tracking is not a production feature yet.
+                  </div>
                 </div>
               </div>
             </div>

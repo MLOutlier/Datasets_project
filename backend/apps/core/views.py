@@ -5,8 +5,10 @@ GET /api/health/ - проверка MongoDB, Redis, Django
 """
 
 import logging
+import shutil
 import time
 from datetime import datetime
+from pathlib import Path
 
 from django.conf import settings
 from django.core.cache import cache
@@ -182,3 +184,66 @@ class RedisCheckView(APIView):
                 "status": "down",
                 "error": str(e)
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class ReadinessCheckView(APIView):
+    """
+    Lightweight readiness endpoint for production probes.
+
+    GET /api/ready/
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        checks = {}
+        ready = True
+
+        try:
+            conn = connection.get_connection()
+            conn.admin.command("ping")
+            checks["mongodb"] = {"status": "ready"}
+        except Exception as exc:
+            checks["mongodb"] = {"status": "not_ready", "error": str(exc)}
+            ready = False
+
+        try:
+            cache.set("readiness_check_key", "ok", timeout=5)
+            value = cache.get("readiness_check_key")
+            cache.delete("readiness_check_key")
+            if value != "ok":
+                raise RuntimeError("Redis read/write mismatch")
+            checks["redis"] = {"status": "ready"}
+        except Exception as exc:
+            checks["redis"] = {"status": "not_ready", "error": str(exc)}
+            ready = False
+
+        media_root = Path(settings.MEDIA_ROOT)
+        try:
+            media_root.mkdir(parents=True, exist_ok=True)
+            probe_path = media_root / ".readiness_check"
+            probe_path.write_text("ok", encoding="utf-8")
+            probe_path.unlink(missing_ok=True)
+            checks["media_storage"] = {"status": "ready", "path": str(media_root)}
+        except Exception as exc:
+            checks["media_storage"] = {"status": "not_ready", "path": str(media_root), "error": str(exc)}
+            ready = False
+
+        ffmpeg_path = shutil.which("ffmpeg")
+        checks["ffmpeg"] = {
+            "status": "ready" if ffmpeg_path else "missing",
+            "path": ffmpeg_path or "",
+            "required_for_video": True,
+        }
+
+        checks["celery"] = {
+            "status": "eager" if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False) else "configured",
+            "always_eager": bool(getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False)),
+        }
+
+        payload = {
+            "status": "ready" if ready else "not_ready",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "checks": checks,
+        }
+        return Response(payload, status=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE)

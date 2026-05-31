@@ -77,7 +77,7 @@ function qualityLabel(strategy?: string) {
     majority_quorum: "решение большинством",
     bbox_iou_consensus_golden: "IoU-consensus и контрольные кадры",
     bbox_validation_golden: "проверка с контрольными кадрами",
-    multi_annotator_review: "несколько исполнителей и ревью",
+    multi_annotator_review: "multi-annotator consensus",
     label_consensus: "согласование меток",
     classification_consensus: "согласование классов",
     preference_consensus: "согласование предпочтений",

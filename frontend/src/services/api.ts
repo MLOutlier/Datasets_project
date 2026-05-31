@@ -173,7 +173,7 @@ export const authAPI = {
 };
 
 export const participantsAPI = {
-  async list(params?: "annotator" | "reviewer" | { role?: "annotator" | "reviewer"; search?: string; specialization?: string; group?: string; limit?: number; offset?: number }): Promise<ApiListResponse<Participant>> {
+  async list(params?: "annotator" | { role?: "annotator"; search?: string; specialization?: string; group?: string; limit?: number; offset?: number }): Promise<ApiListResponse<Participant>> {
     const query = typeof params === "string" ? { role: params } : params;
     const res = await api.get<ApiListResponse<Participant>>("/api/users/participants/", { params: query });
     return res.data;
@@ -303,9 +303,12 @@ export const projectsAPI = {
 };
 
 export const workflowAPI = {
-  async upload(projectId: string, file: File, importId?: string | null): Promise<ProjectImportResponse> {
+  async upload(projectId: string, file: File, importId?: string | null, annotationFile?: File | null): Promise<ProjectImportResponse> {
     const formData = new FormData();
     formData.append("file", file);
+    if (annotationFile) {
+      formData.append("annotation_file", annotationFile);
+    }
     if (importId) {
       formData.append("import_id", importId);
     }

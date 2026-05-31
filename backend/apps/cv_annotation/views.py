@@ -73,10 +73,13 @@ from .services.workflow import (
     golden_assignment_public_id,
     maybe_create_hidden_golden_assignment,
     annotator_interval_chunk_queue,
+    parse_validation_annotation_upload,
     parse_golden_assignment_public_id,
     process_import_asset,
+    project_user_access_state,
     project_overview,
     promote_golden_candidate,
+    record_instruction_review_for_access,
     retire_golden_frame,
     resolve_review,
     submit_golden_annotation_assignment,
@@ -133,6 +136,23 @@ class AuthenticatedAPIView(APIView):
 
     def project_paused_response(self) -> Response:
         return Response({"detail": "Project is paused", "code": "project_paused"}, status=status.HTTP_423_LOCKED)
+
+    def access_gate_response(self, project: Project, user: User, *, allow_qualification: bool = False) -> Response | None:
+        if user.role != User.ROLE_ANNOTATOR:
+            return None
+        state = project_user_access_state(project, user)
+        code = state.get("status")
+        if code in {"qualified", "warning"}:
+            return None
+        if allow_qualification and code == "qualification_required":
+            return None
+        message = {
+            "instruction_required": "Instruction acknowledgement required",
+            "qualification_required": "Qualification golden task required",
+            "retraining_required": "Instruction retraining required",
+            "blocked": "Project access is blocked",
+        }.get(str(code), "Project access is not available")
+        return Response({"detail": message, "code": code, "access_state": state}, status=status.HTTP_423_LOCKED)
 
     def project_id_is_not_paused(self, project_id: str) -> bool:
         if not ObjectId.is_valid(str(project_id)):
@@ -192,6 +212,16 @@ class ProjectImportView(AuthenticatedAPIView):
             import_session = ImportSession(project=project, created_by=user)
             import_session.save()
 
+        validation_annotations = {}
+        annotation_upload = request.FILES.get("annotation_file") or request.FILES.get("annotations")
+        if annotation_upload:
+            validation_annotations = parse_validation_annotation_upload(annotation_upload)
+            if validation_annotations.get("errors"):
+                return Response(
+                    {"detail": "annotation_file is invalid", "errors": validation_annotations.get("errors") or []},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         try:
             payload = save_project_file(request.FILES["file"], str(project.id), str(import_session.id))
         except ValueError as exc:
@@ -212,9 +242,19 @@ class ProjectImportView(AuthenticatedAPIView):
         )
         asset.save()
         processed = process_import_asset(asset, project.frame_interval_sec)
+        previous_summary = import_session.summary or {}
         preview = build_import_preview(import_session)
+        if validation_annotations:
+            previous_summary["validation_upload_annotations"] = validation_annotations
+            preview["validation_annotations"] = {
+                "items_total": int(validation_annotations.get("items_total") or 0),
+                "boxes_total": int(validation_annotations.get("boxes_total") or 0),
+                "intervals_total": int(validation_annotations.get("intervals_total") or 0),
+                "errors": validation_annotations.get("errors") or [],
+            }
         import_session.preview = preview
         import_session.summary = {
+            **previous_summary,
             "last_asset_id": str(processed.id),
             "assets_processed": preview["assets_processed"],
             "assets_failed": preview["assets_failed"],
@@ -420,7 +460,13 @@ class AnnotatorIntervalChunkQueueView(AuthenticatedAPIView):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
         items = annotator_interval_chunk_queue(user) if user.role == User.ROLE_ANNOTATOR else annotator_interval_chunk_queue(user)
         if user.role == User.ROLE_ANNOTATOR:
-            items = [item for item in items if self.project_id_is_not_paused(str(item.get("project_id") or ""))]
+            filtered_items = []
+            for item in items:
+                project_id = str(item.get("project_id") or "")
+                project = Project.objects(id=ObjectId(project_id)).first() if ObjectId.is_valid(project_id) else None
+                if project and self.project_id_is_not_paused(project_id) and not self.access_gate_response(project, user):
+                    filtered_items.append(item)
+            items = filtered_items
         return Response({"items": items}, status=status.HTTP_200_OK)
 
 
@@ -437,6 +483,9 @@ class AnnotatorIntervalChunkSubmitView(AuthenticatedAPIView):
             return Response({"detail": "Assignment not found"}, status=status.HTTP_404_NOT_FOUND)
         if user.role != User.ROLE_ADMIN and str(assignment.annotator.id) != str(user.id):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+        gate = self.access_gate_response(assignment.project, user)
+        if gate:
+            return gate
         serializer = VideoChunkSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         result = submit_interval_chunk_assignment(
@@ -460,7 +509,11 @@ class IntervalValidationQueueView(AuthenticatedAPIView):
         if user.role == User.ROLE_ADMIN:
             projects = list(Project.objects)
         else:
-            projects = [membership.project for membership in ProjectMembership.objects(user=user, is_active=True) if membership.project.status != Project.STATUS_PAUSED]
+            projects = [
+                membership.project
+                for membership in ProjectMembership.objects(user=user, is_active=True)
+                if membership.project.status != Project.STATUS_PAUSED and not self.access_gate_response(membership.project, user)
+            ]
         for project in projects:
             settings = workflow_runtime_settings(project)
             ensure_interval_validation_assignments(project, min_validators=settings["interval_validators_per_item"])
@@ -485,6 +538,9 @@ class IntervalValidationSubmitView(AuthenticatedAPIView):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if user.role == User.ROLE_ANNOTATOR and assignment.project.status == Project.STATUS_PAUSED:
             return self.project_paused_response()
+        gate = self.access_gate_response(assignment.project, user)
+        if gate:
+            return gate
         serializer = IntervalValidationDecisionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         settings = workflow_runtime_settings(assignment.project)
@@ -515,6 +571,7 @@ class BBoxValidationQueueView(AuthenticatedAPIView):
             owner_projects = list(Project.objects(owner=user))
             projects = list({str(item.id): item for item in [*member_projects, *owner_projects]}.values())
             projects = [project for project in projects if project.status != Project.STATUS_PAUSED]
+            projects = [project for project in projects if not self.access_gate_response(project, user)]
         for project in projects:
             settings = workflow_runtime_settings(project)
             ensure_bbox_validation_assignments(
@@ -544,6 +601,9 @@ class BBoxValidationSubmitView(AuthenticatedAPIView):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if user.role == User.ROLE_ANNOTATOR and assignment.project.status == Project.STATUS_PAUSED:
             return self.project_paused_response()
+        gate = self.access_gate_response(assignment.project, user)
+        if gate:
+            return gate
         serializer = BBoxValidationSubmitSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         settings = workflow_runtime_settings(assignment.project)
@@ -632,7 +692,26 @@ class ProjectGoldenSourceFramesView(AuthenticatedAPIView):
             offset = max(0, int(request.query_params.get("offset", 0)))
         except ValueError:
             offset = 0
-        frames = list(FrameItem.objects(project=project).order_by("asset", "frame_number"))
+        frames_by_id = {
+            str(frame.id): frame
+            for frame in FrameItem.objects(project=project).order_by("asset", "frame_number")
+        }
+        work_items_by_frame = {}
+        for work_item in WorkItem.objects(project=project).order_by("created_at"):
+            frame = getattr(work_item, "frame", None)
+            if not frame:
+                continue
+            frame_id = str(frame.id)
+            frames_by_id.setdefault(frame_id, frame)
+            work_items_by_frame.setdefault(frame_id, work_item)
+        frames = sorted(
+            frames_by_id.values(),
+            key=lambda frame: (
+                str(frame.asset.id) if getattr(frame, "asset", None) else "",
+                int(frame.frame_number or 0),
+                str(frame.id),
+            ),
+        )
         if search:
             frames = [
                 frame for frame in frames
@@ -643,7 +722,6 @@ class ProjectGoldenSourceFramesView(AuthenticatedAPIView):
         total = len(frames)
         frames = frames[offset:offset + limit]
         golden_by_frame = {str(item.frame.id): item for item in GoldenFrame.objects(project=project, frame__in=frames)}
-        work_items_by_frame = {str(item.frame.id): item for item in WorkItem.objects(project=project, frame__in=frames)}
         items = []
         for frame in frames:
             frame_id = str(frame.id)
@@ -1153,6 +1231,7 @@ class AnnotatorProjectInstructionAckView(AuthenticatedAPIView):
         if user.role not in (User.ROLE_ANNOTATOR, User.ROLE_ADMIN):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
         acknowledge_instructions(project, user)
+        record_instruction_review_for_access(project, user)
         return Response(instruction_bundle(project, user), status=status.HTTP_200_OK)
 
 
@@ -1170,6 +1249,9 @@ class AnnotatorProjectNextAssignmentView(AuthenticatedAPIView):
         if user.role not in (User.ROLE_ANNOTATOR, User.ROLE_ADMIN):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
         _recover_stuck_assignments(project)
+        gate = self.access_gate_response(project, user, allow_qualification=True)
+        if gate:
+            return gate
 
         assignments = list(
             Assignment.objects(project=project, annotator=user).order_by("queue_position", "created_at")
@@ -1183,6 +1265,9 @@ class AnnotatorProjectNextAssignmentView(AuthenticatedAPIView):
         golden_assignment = maybe_create_hidden_golden_assignment(project, user)
         if golden_assignment:
             return Response({"assignment_id": golden_assignment_public_id(golden_assignment), "source": "golden_annotation"}, status=status.HTTP_200_OK)
+        gate = self.access_gate_response(project, user)
+        if gate:
+            return gate
 
         next_assignment = next((item for item in assignments if item.status == Assignment.STATUS_ASSIGNED), None)
         if next_assignment:
@@ -1208,6 +1293,9 @@ class AnnotatorAssignmentDetailView(AuthenticatedAPIView):
                 return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
             if user.role == User.ROLE_ANNOTATOR and golden_assignment.project.status == Project.STATUS_PAUSED:
                 return self.project_paused_response()
+            gate = self.access_gate_response(golden_assignment.project, user, allow_qualification=True)
+            if gate:
+                return gate
             return Response(golden_annotation_assignment_payload(golden_assignment), status=status.HTTP_200_OK)
         if not ObjectId.is_valid(assignment_id):
             return Response({"detail": "Invalid assignment id"}, status=status.HTTP_400_BAD_REQUEST)
@@ -1220,6 +1308,9 @@ class AnnotatorAssignmentDetailView(AuthenticatedAPIView):
             return self.project_paused_response()
         if user.role == User.ROLE_ANNOTATOR and assignment.project.status == Project.STATUS_PAUSED:
             return self.project_paused_response()
+        gate = self.access_gate_response(assignment.project, user)
+        if gate:
+            return gate
         if assignment.status == Assignment.STATUS_ASSIGNED:
             assignment.status = Assignment.STATUS_IN_PROGRESS
             assignment.save()
@@ -1276,6 +1367,9 @@ class AnnotatorAssignmentSubmitView(AuthenticatedAPIView):
                 return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
             if user.role == User.ROLE_ANNOTATOR and golden_assignment.project.status == Project.STATUS_PAUSED:
                 return self.project_paused_response()
+            gate = self.access_gate_response(golden_assignment.project, user, allow_qualification=True)
+            if gate:
+                return gate
             serializer = AssignmentSubmitSerializer(
                 data=request.data,
                 context={"assignment": None, "frame": golden_assignment.golden_frame.frame, "label_schema": golden_assignment.project.label_schema or []},
@@ -1305,6 +1399,9 @@ class AnnotatorAssignmentSubmitView(AuthenticatedAPIView):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
         if user.role == User.ROLE_ANNOTATOR and assignment.project.status == Project.STATUS_PAUSED:
             return self.project_paused_response()
+        gate = self.access_gate_response(assignment.project, user)
+        if gate:
+            return gate
         serializer = AssignmentSubmitSerializer(data=request.data, context={"assignment": assignment})
         serializer.is_valid(raise_exception=True)
         annotation, evaluation = save_assignment_annotation(

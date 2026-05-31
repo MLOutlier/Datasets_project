@@ -207,7 +207,7 @@ export default function ProjectGoldenPage() {
           <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{project.title}</div>
           <h1 className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">Golden Dataset</h1>
           <p className="mt-2 max-w-3xl text-sm text-gray-600 dark:text-gray-400">
-            Create and review hidden control examples used to measure annotator quality.
+            Create and manage hidden control examples used to measure annotator quality.
           </p>
         </div>
         <Link to={`/projects/${projectId}`} className="btn-secondary">Back to project</Link>
@@ -323,7 +323,7 @@ export default function ProjectGoldenPage() {
             <select className="input-field" value={issueType} onChange={(event) => setIssueType(event.target.value)}>
               {ISSUE_OPTIONS.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
-            <textarea className="input-field min-h-[88px]" value={reviewNotes} onChange={(event) => setReviewNotes(event.target.value)} placeholder="Review notes" />
+            <textarea className="input-field min-h-[88px]" value={reviewNotes} onChange={(event) => setReviewNotes(event.target.value)} placeholder="Notes for this control case" />
             {error ? <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div> : null}
             <button
               type="button"
