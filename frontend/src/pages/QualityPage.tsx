@@ -17,6 +17,7 @@ export function QualityPage() {
     queryKey: ["validation-queue"],
     queryFn: () => validationAPI.queue(),
     enabled: user?.role === "customer" || user?.role === "admin",
+    select: (data) => ({ ...data, items: data?.items ?? [] }), 
   });
 
   const selectedQueueItem = useMemo(
