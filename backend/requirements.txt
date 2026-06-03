@@ -26,3 +26,5 @@ pytest-django==4.9.0
 
 # Транслитерация
 transliterate==1.10.2
+
+gunicorn==21.2.0
