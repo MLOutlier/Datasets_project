@@ -156,10 +156,11 @@ CACHES = {
 # =============================================================================
 # CELERY
 # =============================================================================
-# Отключаем для разработки чтобы не блокировало регистрацию
-CELERY_TASK_ALWAYS_EAGER = True  # Выполнять задачи синхронно
-CELERY_BROKER_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-CELERY_RESULT_BACKEND = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+CELERY_TASK_ALWAYS_EAGER = True
+
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
