@@ -116,9 +116,13 @@ logger.info(f"BCRYPT_ROUNDS={BCRYPT_ROUNDS}")
 # =============================================================================
 # REDIS НАСТРОЙКИ
 # =============================================================================
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+# REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+# REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+# REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+
+REDIS_URL = os.getenv("REDIS_URL")
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
 
 # =============================================================================
 # БАЗЫ ДАННЫХ
