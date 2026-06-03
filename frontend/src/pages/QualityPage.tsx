@@ -20,7 +20,7 @@ export function QualityPage() {
   });
 
   const selectedQueueItem = useMemo(
-    () => queueQuery.data?.items.find((item) => `${item.project_id}:${item.task_batch_id}` === selectedBatchKey) ?? null,
+    () => (queueQuery.data?.items ?? []).find((item) => `${item.project_id}:${item.task_batch_id}` === selectedBatchKey) ?? null,
     [queueQuery.data?.items, selectedBatchKey]
   );
 
